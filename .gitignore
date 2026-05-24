@@ -1,0 +1,6 @@
+build/
+.codex-watch/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.xcuserdatad/
