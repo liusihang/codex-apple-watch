@@ -74,6 +74,22 @@ struct CodexPickerItem: Codable, Identifiable, Hashable {
     }
 }
 
+struct ConversationEntry: Codable, Identifiable, Hashable {
+    var id: String
+    var turnID: String?
+    var role: String
+    var text: String
+    var phase: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case turnID = "turnId"
+        case role
+        case text
+        case phase
+    }
+}
+
 struct BridgeMessage: Codable {
     var type: String
     var pet: String?
@@ -98,6 +114,8 @@ struct BridgeMessage: Codable {
     var chatIndex: Int?
     var items: [CodexPickerItem]?
     var newChat: Bool?
+    var entries: [ConversationEntry]?
+    var hasMore: Bool?
 
     init(
         type: String,
@@ -122,7 +140,9 @@ struct BridgeMessage: Codable {
         projectIndex: Int? = nil,
         chatIndex: Int? = nil,
         items: [CodexPickerItem]? = nil,
-        newChat: Bool? = nil
+        newChat: Bool? = nil,
+        entries: [ConversationEntry]? = nil,
+        hasMore: Bool? = nil
     ) {
         self.type = type
         self.pet = pet
@@ -147,5 +167,7 @@ struct BridgeMessage: Codable {
         self.chatIndex = chatIndex
         self.items = items
         self.newChat = newChat
+        self.entries = entries
+        self.hasMore = hasMore
     }
 }

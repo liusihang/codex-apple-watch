@@ -54,6 +54,281 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.ok(response.messages.at(-1)?.items.some(item => item.kind === "project"));
   });
 
+  test("hello resolves placeholder selection to the real Codex chat", async () => {
+    const response = await postMessage("selection-client", {
+      type: "hello",
+      pet: "codex",
+      capabilities: ["project-chat-picker"],
+      project: "project-1",
+      chat: "chat-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+
+    assert.equal(response.messages.at(-1)?.chat, "thread-e2e-1");
+    assert.equal(response.messages.at(-1)?.project, `project:${path.join(tempDir, "project-one")}`);
+  });
+
+  test("broadcasts preserve each watch client selected pet", async () => {
+    await writeSessionFixture(tempDir, {
+      threadId: "thread-e2e-2",
+      cwd: path.join(tempDir, "project-two"),
+      prompt: "Second fixture prompt"
+    });
+    await postMessage("fireball-watch", {
+      type: "hello",
+      pet: "fireball",
+      capabilities: ["codex-pets"],
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1"
+    });
+    await postMessage("codex-watch", {
+      type: "hello",
+      pet: "codex",
+      capabilities: ["codex-pets"],
+      project: `project:${path.join(tempDir, "project-two")}`,
+      chat: "thread-e2e-2"
+    });
+
+    await postMessage("codex-watch", {
+      type: "state",
+      pet: "codex",
+      state: "thinking",
+      title: "Codex is thinking",
+      body: "Working on it"
+    });
+
+    const fireballMessages = await poll("fireball-watch");
+    assert.equal(fireballMessages.messages.at(-1)?.pet, "fireball");
+    assert.equal(fireballMessages.messages.at(-1)?.chat, "thread-e2e-1");
+  });
+
+  test("chat-opened returns ordered recent user and assistant messages", async () => {
+    process.env.CODEX_WATCH_MOCK_RESUME_HISTORY = JSON.stringify({
+      thread: {
+        id: "thread-e2e-1",
+        status: { type: "idle" },
+        turns: [
+          {
+            id: "turn-1",
+            status: "completed",
+            items: [
+              {
+                id: "user-1",
+                type: "userMessage",
+                content: [{ type: "inputText", text: "First question" }]
+              },
+              {
+                id: "agent-1",
+                type: "agentMessage",
+                text: "First answer"
+              }
+            ]
+          },
+          {
+            id: "turn-2",
+            status: "completed",
+            items: [
+              {
+                id: "user-2",
+                type: "userMessage",
+                content: [{ type: "inputText", text: "Second question" }]
+              },
+              {
+                id: "agent-2",
+                type: "agentMessage",
+                text: "Second answer"
+              }
+            ]
+          }
+        ]
+      }
+    });
+
+    await postMessage("history-client", {
+      type: "hello",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    await postMessage("history-client", {
+      type: "chat-opened",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+
+    const messages = await pollUntil("history-client", allMessages => {
+      return allMessages.some(message => message.type === "conversation");
+    });
+    const conversation = messages.findLast(message => message.type === "conversation");
+
+    assert.deepEqual(conversation?.entries.map(entry => [entry.role, entry.text]), [
+      ["user", "First question"],
+      ["assistant", "First answer"],
+      ["user", "Second question"],
+      ["assistant", "Second answer"]
+    ]);
+    assert.equal(conversation?.hasMore, false);
+  });
+
+  test("chat-opened falls back to session JSONL and limits the response to 20 messages", async () => {
+    process.env.CODEX_WATCH_MOCK_RESUME_ERROR = "1";
+    const fixtureFile = sessionFixturePath(tempDir, "thread-e2e-1");
+    const events = [];
+    for (let index = 1; index <= 11; index += 1) {
+      events.push({
+        type: "response_item",
+        payload: {
+          id: `user-${index}`,
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: `Question ${index}` }]
+        }
+      });
+      events.push({
+        type: "response_item",
+        payload: {
+          id: `assistant-${index}`,
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: `Answer ${index}` }]
+        }
+      });
+    }
+    await fs.appendFile(fixtureFile, `${events.map(event => JSON.stringify(event)).join("\n")}\n`);
+
+    await postMessage("fallback-history-client", {
+      type: "hello",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    const opened = await postMessage("fallback-history-client", {
+      type: "chat-opened",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+
+    const messages = opened.messages.some(message => message.type === "conversation")
+      ? opened.messages
+      : await pollUntil("fallback-history-client", allMessages => {
+        return allMessages.some(message => message.type === "conversation");
+      });
+    const conversation = messages.findLast(message => message.type === "conversation");
+
+    assert.equal(conversation?.entries.length, 20);
+    assert.equal(conversation?.entries[0]?.text, "Question 2");
+    assert.equal(conversation?.entries.at(-1)?.text, "Answer 11");
+    assert.equal(conversation?.hasMore, true);
+  });
+
+  test("chat-opened reads legacy type-message JSONL when app-server is unavailable", async () => {
+    process.env.CODEX_WATCH_MOCK_RESUME_ERROR = "1";
+
+    await postMessage("legacy-history-client", {
+      type: "hello",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    const opened = await postMessage("legacy-history-client", {
+      type: "chat-opened",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    const messages = opened.messages.some(message => message.type === "conversation")
+      ? opened.messages
+      : await pollUntil("legacy-history-client", allMessages => {
+        return allMessages.some(message => message.type === "conversation");
+      });
+    const conversation = messages.findLast(message => message.type === "conversation");
+
+    assert.deepEqual(conversation?.entries.map(entry => [entry.role, entry.text]), [
+      ["user", "Initial fixture prompt"]
+    ]);
+    assert.equal(conversation?.hasMore, false);
+  });
+
+  test("chat-opened follows app-server item pagination to fill the latest 20 messages", async () => {
+    const descendingItems = [];
+    for (let index = 11; index >= 1; index -= 1) {
+      descendingItems.push({
+        turnId: `turn-${index}`,
+        item: { id: `assistant-${index}`, type: "agentMessage", text: `Answer ${index}` }
+      });
+      descendingItems.push({
+        turnId: `turn-${index}`,
+        item: {
+          id: `user-${index}`,
+          type: "userMessage",
+          content: [{ type: "inputText", text: `Question ${index}` }]
+        }
+      });
+    }
+    process.env.CODEX_WATCH_MOCK_RESUME_HISTORY = JSON.stringify({
+      thread: {
+        id: "thread-e2e-1",
+        status: { type: "idle" },
+        turns: [{
+          id: "turn-11",
+          status: "completed",
+          items: [
+            { id: "user-11", type: "userMessage", content: [{ type: "inputText", text: "Question 11" }] },
+            { id: "assistant-11", type: "agentMessage", text: "Answer 11" }
+          ]
+        }]
+      },
+      itemsBackwardsCursor: "items-head"
+    });
+    process.env.CODEX_WATCH_MOCK_ITEMS_LIST = JSON.stringify({
+      data: descendingItems,
+      nextCursor: "older-items",
+      backwardsCursor: "items-head"
+    });
+
+    await postMessage("paginated-history-client", {
+      type: "hello",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+    await postMessage("paginated-history-client", {
+      type: "chat-opened",
+      pet: "codex",
+      project: `project:${path.join(tempDir, "project-one")}`,
+      chat: "thread-e2e-1",
+      projectIndex: 0,
+      chatIndex: 0
+    });
+
+    const messages = await pollUntil("paginated-history-client", allMessages => {
+      return allMessages.some(message => message.type === "conversation");
+    });
+    const conversation = messages.findLast(message => message.type === "conversation");
+
+    assert.equal(conversation?.entries.length, 20);
+    assert.equal(conversation?.entries[0]?.text, "Question 2");
+    assert.equal(conversation?.entries.at(-1)?.text, "Answer 11");
+    assert.equal(conversation?.hasMore, true);
+  });
+
   test("WebSocket access remains available when authentication is disabled", async () => {
     assert.equal(await websocketStatus(), 101);
   });
@@ -377,10 +652,10 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
 });
 
 async function writeSessionFixture(root, { threadId, cwd, prompt }) {
-  const directory = path.join(root, "2026", "05", "24");
+  const directory = path.dirname(sessionFixturePath(root, threadId));
   await fs.mkdir(directory, { recursive: true });
   await fs.mkdir(cwd, { recursive: true });
-  const file = path.join(directory, `${threadId}.jsonl`);
+  const file = sessionFixturePath(root, threadId);
   const lines = [
     {
       type: "session_meta",
@@ -400,6 +675,10 @@ async function writeSessionFixture(root, { threadId, cwd, prompt }) {
     }
   ];
   await fs.writeFile(file, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+}
+
+function sessionFixturePath(root, threadId) {
+  return path.join(root, "2026", "05", "24", `${threadId}.jsonl`);
 }
 
 function baseURL() {

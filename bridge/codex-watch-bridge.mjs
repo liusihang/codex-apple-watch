@@ -22,6 +22,7 @@ const clients = new Set();
 const httpClients = new Map();
 const durableStateBySelection = new Map();
 const readStateSignaturesBySelection = new Map();
+const sessionFileByThread = new Map();
 let latestDurableState = null;
 
 export function createBridgeServer() {
@@ -245,6 +246,7 @@ function handleText(client, text) {
     case "hello":
       console.log("hello", client.pet, client.capabilities.join(",") || "no-capabilities");
       maybeOpenCodex();
+      resolveClientSelection(client);
       send(client, replayStateForClient(client) ?? {
         type: "state",
         pet: client.pet,
@@ -288,6 +290,7 @@ function handleText(client, text) {
     case "picker-opened":
       console.log("picker-opened", client.selection.target);
       client.pickerItems = loadCodexPickerItems();
+      resolveClientSelection(client);
       send(client, {
         type: "picker-items",
         pet: client.pet,
@@ -301,6 +304,22 @@ function handleText(client, text) {
     case "project-selected":
     case "chat-selected":
       handleSelection(client, message);
+      break;
+    case "chat-opened":
+      handleChatOpened(client, message).catch(error => {
+        warnBridge("chat history failed", error);
+        send(client, {
+          type: "conversation",
+          pet: client.pet,
+          title: typeof message.title === "string" ? message.title : "Conversation",
+          body: error.message,
+          entries: [],
+          hasMore: false,
+          capabilities: client.capabilities,
+          items: client.pickerItems,
+          ...client.selection
+        });
+      });
       break;
     case "mic-start":
       console.log("mic-start", client.pet);
@@ -855,6 +874,82 @@ function activeTurnFromResume(resume) {
   return null;
 }
 
+async function handleChatOpened(client, message) {
+  const target = resolveTranscriptTarget(client, message);
+  if (!target?.threadId) {
+    throw new Error("Pick a Codex chat before opening it.");
+  }
+
+  applyTranscriptTargetSelection(client, target.item, target.threadId);
+  const localEntries = conversationEntriesForThread(target.threadId);
+  let allEntries = localEntries.length >= 2 ? localEntries : [];
+  let hasMore = allEntries.length > 20;
+  let resume = null;
+  let resumeError = null;
+  if (allEntries.length === 0) {
+    try {
+      const appServer = getCodexAppServer();
+      resume = await appServer.request("thread/resume", {
+        threadId: target.threadId,
+        excludeTurns: false,
+        persistExtendedHistory: false
+      }, { timeoutMs: 12000 });
+      const page = await conversationPageFromAppServer(appServer, target.threadId, resume);
+      allEntries = page.entries;
+      hasMore = page.hasMore;
+    } catch (error) {
+      resumeError = error;
+    }
+  }
+  if (allEntries.length === 0) {
+    allEntries = localEntries;
+    hasMore = localEntries.length > 20;
+  }
+  if (allEntries.length === 0 && resumeError) {
+    throw resumeError;
+  }
+
+  const limit = 20;
+  const item = target.item || client.pickerItems.find(candidate => candidate.chat === target.threadId);
+  send(client, {
+    type: "conversation",
+    pet: client.pet,
+    title: item?.title || "Conversation",
+    entries: allEntries.slice(-limit),
+    hasMore: hasMore || allEntries.length > limit,
+    capabilities: client.capabilities,
+    items: client.pickerItems,
+    ...client.selection
+  });
+}
+
+async function conversationPageFromAppServer(appServer, threadId, resume) {
+  const itemsCursor = stringOrNull(resume?.itemsBackwardsCursor);
+  if (!itemsCursor) {
+    return {
+      entries: conversationEntriesFromResume(resume),
+      hasMore: Boolean(resume?.turnsBackwardsCursor)
+    };
+  }
+
+  let cursor = itemsCursor;
+  const descendingEntries = [];
+  for (let pageIndex = 0; cursor && descendingEntries.length <= 20 && pageIndex < 5; pageIndex += 1) {
+    const page = await appServer.request("thread/items/list", {
+      threadId,
+      cursor,
+      limit: 100,
+      sortDirection: "desc"
+    }, { timeoutMs: 12000 });
+    descendingEntries.push(...conversationEntriesFromItemPage(page));
+    cursor = stringOrNull(page?.nextCursor);
+  }
+  return {
+    entries: descendingEntries.reverse(),
+    hasMore: Boolean(cursor) || descendingEntries.length > 20
+  };
+}
+
 async function refreshClientStateFromCodex(client) {
   if (client.selection.newChat) {
     return;
@@ -1024,6 +1119,127 @@ function latestAssistantTextFromResume(resume) {
   return "";
 }
 
+function conversationEntriesFromResume(resume) {
+  const turns = resume?.thread?.turns;
+  if (!Array.isArray(turns)) {
+    return [];
+  }
+  const entries = [];
+  turns.forEach((turn, turnIndex) => {
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    items.forEach((item, itemIndex) => {
+      const entry = conversationEntryFromObject(item, {
+        id: `resume-${turnIndex}-${itemIndex}`,
+        turnId: stringOrNull(turn?.id)
+      });
+      if (entry) {
+        entries.push(entry);
+      }
+    });
+  });
+  return entries;
+}
+
+function conversationEntriesFromItemPage(page) {
+  const data = Array.isArray(page?.data) ? page.data : [];
+  return data.flatMap((entry, index) => {
+    const conversationEntry = conversationEntryFromObject(entry?.item, {
+      id: `item-page-${index}`,
+      turnId: stringOrNull(entry?.turnId)
+    });
+    return conversationEntry ? [conversationEntry] : [];
+  });
+}
+
+function conversationEntriesForThread(threadId) {
+  const file = sessionFileForThread(threadId);
+  if (!file) {
+    return [];
+  }
+
+  const responseEntries = [];
+  const legacyEntries = [];
+  const lines = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+  lines.forEach((line, index) => {
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const entry = conversationEntryFromObject(event.payload, {
+      id: `session-${index}`,
+      turnId: stringOrNull(event.payload?.turn_id) || stringOrNull(event.payload?.turnId)
+    });
+    if (!entry) {
+      return;
+    }
+    if (event.type === "response_item") {
+      responseEntries.push(entry);
+    } else if (event.type === "event_msg" || event.type === "message") {
+      legacyEntries.push(entry);
+    }
+  });
+  return responseEntries.length > 0 ? responseEntries : legacyEntries;
+}
+
+function conversationEntryFromObject(value, fallback) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const type = typeof value.type === "string" ? value.type : "";
+  const role = value.role === "user" || type === "userMessage" || type === "user_message"
+    ? "user"
+    : value.role === "assistant" || type === "agentMessage" || type === "agent_message"
+      ? "assistant"
+      : null;
+  if (!role) {
+    return null;
+  }
+
+  const rawText = textFromConversationObject(value);
+  const text = role === "user" ? cleanConversationText(rawText) : rawText.trim();
+  if (!text) {
+    return null;
+  }
+  return {
+    id: stringOrNull(value.id) || fallback.id,
+    turnId: stringOrNull(value.turnId) || stringOrNull(value.turn_id) || fallback.turnId,
+    role,
+    text,
+    phase: stringOrNull(value.phase)
+  };
+}
+
+function textFromConversationObject(value) {
+  if (typeof value.message === "string") {
+    return value.message;
+  }
+  if (typeof value.text === "string") {
+    return value.text;
+  }
+  if (Array.isArray(value.content)) {
+    return value.content
+      .map(part => typeof part?.text === "string" ? part.text : "")
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function cleanConversationText(text) {
+  const withoutBlocks = String(text || "")
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, "")
+    .replace(/<permissions instructions>[\s\S]*?<\/permissions instructions>/g, "")
+    .replace(/<apps_instructions>[\s\S]*?<\/apps_instructions>/g, "")
+    .replace(/<skills_instructions>[\s\S]*?<\/skills_instructions>/g, "")
+    .replace(/<plugins_instructions>[\s\S]*?<\/plugins_instructions>/g, "")
+    .replace(/<recommended_plugins>[\s\S]*?<\/recommended_plugins>/g, "")
+    .replace(/<response-annotations>[\s\S]*?<\/response-annotations>/g, "")
+    .replace(/<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/g, "");
+  return withoutBlocks.split("# AGENTS.md instructions")[0].trim();
+}
+
 function latestAssistantTextForThread(threadId) {
   const file = sessionFileForThread(threadId);
   if (!file) {
@@ -1069,6 +1285,9 @@ function assistantTextFromObject(value) {
   if (value.role === "assistant" && typeof value.text === "string") {
     return value.text.trim();
   }
+  if (value.type === "agentMessage" && typeof value.text === "string") {
+    return value.text.trim();
+  }
   if (value.role === "assistant" && Array.isArray(value.content)) {
     return value.content
       .map(part => typeof part?.text === "string" ? part.text : "")
@@ -1087,6 +1306,10 @@ function assistantTextFromObject(value) {
 function sessionFileForThread(threadId) {
   if (!threadId) {
     return null;
+  }
+  const knownFile = sessionFileByThread.get(threadId);
+  if (knownFile && fs.existsSync(knownFile)) {
+    return knownFile;
   }
   const files = findSessionFiles(currentCodexSessionsDir());
   for (const file of files) {
@@ -1245,6 +1468,12 @@ class MockCodexAppServerClient {
   async request(method, params = {}) {
     switch (method) {
       case "thread/resume":
+        if (process.env.CODEX_WATCH_MOCK_RESUME_ERROR === "1") {
+          throw new Error("Mock thread/resume unavailable");
+        }
+        if (process.env.CODEX_WATCH_MOCK_RESUME_HISTORY) {
+          return JSON.parse(process.env.CODEX_WATCH_MOCK_RESUME_HISTORY);
+        }
         if (process.env.CODEX_WATCH_MOCK_RESUME_STATE === "thinking") {
           return {
             thread: {
@@ -1277,7 +1506,12 @@ class MockCodexAppServerClient {
             status: { type: "idle" },
             turns: []
           }
-        };
+          };
+      case "thread/items/list":
+        if (process.env.CODEX_WATCH_MOCK_ITEMS_LIST) {
+          return JSON.parse(process.env.CODEX_WATCH_MOCK_ITEMS_LIST);
+        }
+        return { data: [], nextCursor: null, backwardsCursor: null };
       case "thread/start": {
         const threadId = `mock-new-thread-${Date.now()}`;
         queueMicrotask(() => {
@@ -1755,6 +1989,33 @@ function handleSelection(client, message) {
   });
 }
 
+function resolveClientSelection(client) {
+  const chats = client.pickerItems.filter(item => stringOrNull(item.chat));
+  const exact = chats.find(item => item.chat === client.selection.chat);
+  const indexed = chats.find(item => {
+    return item.projectIndex === client.selection.projectIndex
+      && item.chatIndex === client.selection.chatIndex;
+  });
+  const selected = exact || indexed || chats[0];
+  if (selected) {
+    applyTranscriptTargetSelection(client, selected, selected.chat);
+    return;
+  }
+
+  const projects = client.pickerItems.filter(item => item.kind === "project" && stringOrNull(item.project));
+  const project = projects.find(item => item.project === client.selection.project)
+    || projects.find(item => item.projectIndex === client.selection.projectIndex)
+    || projects[0];
+  if (project) {
+    client.selection.target = "project";
+    client.selection.project = project.project;
+    client.selection.projectIndex = project.projectIndex ?? 0;
+    client.selection.chat = "";
+    client.selection.chatIndex = 0;
+    client.selection.newChat = false;
+  }
+}
+
 function updateClientPickerItems(client, message) {
   if (Array.isArray(message.items)) {
     client.pickerItems = normalizePickerItems(message.items);
@@ -1793,6 +2054,10 @@ function loadCodexPickerItems() {
     const sessions = sessionFiles
       .map(({ file, mtimeMs }) => readSessionSummary(file, mtimeMs))
       .filter(Boolean);
+    sessionFileByThread.clear();
+    for (const session of sessions) {
+      sessionFileByThread.set(session.id, session.file);
+    }
     return buildPickerItems(sessions);
   } catch (error) {
     warnBridge("failed to load Codex sessions", error);
@@ -2148,7 +2413,7 @@ function send(client, message) {
 
 function broadcast(message) {
   for (const client of clients) {
-    send(client, message);
+    send(client, { ...message, pet: client.pet, ...client.selection });
   }
 }
 
@@ -2264,6 +2529,7 @@ export function resetBridgeStateForTests() {
   httpClients.clear();
   durableStateBySelection.clear();
   readStateSignaturesBySelection.clear();
+  sessionFileByThread.clear();
   latestDurableState = null;
   codexAppServer?.dispose?.();
   codexAppServer = null;

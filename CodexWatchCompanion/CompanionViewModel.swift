@@ -95,6 +95,14 @@ struct ReadableMessage: Identifiable {
     let body: String
 }
 
+struct ConversationThread: Identifiable {
+    let id: String
+    let title: String
+    let entries: [ConversationEntry]?
+    let hasMore: Bool
+    let error: String?
+}
+
 private struct PersistedVisibleTask: Codable {
     let state: String
     let title: String
@@ -133,8 +141,10 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var pickerItems: [CodexPickerItem] = []
     @Published var transcriptReview: VoiceTranscript?
     @Published var messageReader: ReadableMessage?
+    @Published private(set) var conversation: ConversationThread?
     @Published var showingPicker = false
     @Published var showingOnboarding = false
+    @Published var showingConversation = false
 
     var hasPetAnnouncement: Bool {
         guard !isVoiceModeActive else { return false }
@@ -230,6 +240,18 @@ final class CompanionViewModel: ObservableObject {
 
     var directChatPickerItems: [CodexPickerItem] {
         pickerItems.filter(isChatListItem)
+    }
+
+    var currentChatTitle: String {
+        currentChatItem?.title ?? "Choose a chat"
+    }
+
+    var currentChatSubtitle: String {
+        currentChatItem?.subtitle ?? "Turn the Digital Crown"
+    }
+
+    var canOpenCurrentChat: Bool {
+        currentChatItem != nil && !selectedNewChat
     }
 
     var primaryShortcutLabel: String {
@@ -522,28 +544,7 @@ final class CompanionViewModel: ObservableObject {
     }
 
     func selectPickerItem(_ item: CodexPickerItem) {
-        let target = pickerTarget(for: item)
-        crownTarget = target
-        defaults.set(crownTarget.rawValue, forKey: "crownTarget")
-
-        if let projectIndex = item.projectIndex {
-            self.projectIndex = wrappedIndex(projectIndex)
-            defaults.set(self.projectIndex, forKey: "selectedProjectIndex")
-        }
-        if let chatIndex = item.chatIndex {
-            self.chatIndex = wrappedIndex(chatIndex)
-            defaults.set(self.chatIndex, forKey: "selectedChatIndex")
-        }
-        if let project = item.project, !project.isEmpty {
-            selectedProjectOverride = project
-        } else if target == .project {
-            selectedProjectOverride = nil
-        }
-        if let chat = item.chat, !chat.isEmpty {
-            selectedChatOverride = chat
-        } else if target == .chat {
-            selectedChatOverride = nil
-        }
+        let target = applyPickerItemSelection(item)
 
         showingPicker = false
         let selectionBody = item.subtitle ?? (target == .project ? selectedProjectID : selectedChatID)
@@ -566,6 +567,60 @@ final class CompanionViewModel: ObservableObject {
             newChat: false
         ))
         pulseFeedback(target == .project ? .jumping : .waving)
+    }
+
+    func openChat(_ item: CodexPickerItem) {
+        guard pickerTarget(for: item) == .chat, let chatID = item.chat, !chatID.isEmpty else { return }
+        if connectionState != .connected {
+            applyPickerItemSelection(item)
+            conversation = ConversationThread(
+                id: chatID,
+                title: item.title,
+                entries: [],
+                hasMore: false,
+                error: "Connect to the Bridge to open chats."
+            )
+            showingConversation = true
+            return
+        }
+        selectPickerItem(item)
+        conversation = ConversationThread(
+            id: chatID,
+            title: item.title,
+            entries: nil,
+            hasMore: false,
+            error: nil
+        )
+        showingConversation = true
+        socket.send(BridgeMessage(
+            type: "chat-opened",
+            pet: selectedPet.id,
+            state: visualState.rawValue,
+            title: item.title,
+            capabilities: capabilities,
+            target: CrownSelectionTarget.chat.rawValue,
+            action: "open",
+            project: selectedProjectID,
+            chat: selectedChatID,
+            projectIndex: projectIndex,
+            chatIndex: chatIndex,
+            newChat: false
+        ))
+    }
+
+    func openSelectedChat() {
+        guard let currentChatItem else { return }
+        openChat(currentChatItem)
+    }
+
+    func closeConversation() {
+        showingConversation = false
+        conversation = nil
+    }
+
+    func replyToConversation() {
+        closeConversation()
+        beginRecording()
     }
 
     func startNewChat(in project: CodexPickerItem? = nil) {
@@ -756,21 +811,11 @@ final class CompanionViewModel: ObservableObject {
     func rotateCrown(delta: Int) {
         guard delta != 0 else { return }
         let boundedDelta = max(-24, min(24, delta))
-
-        switch crownTarget {
-        case .project:
-            projectIndex = wrappedIndex(projectIndex + boundedDelta)
-            selectedProjectOverride = nil
-            defaults.set(projectIndex, forKey: "selectedProjectIndex")
-            advertiseSelection(type: "project-selected", delta: boundedDelta)
-        case .chat:
-            chatIndex = wrappedIndex(chatIndex + boundedDelta)
-            selectedChatOverride = nil
-            defaults.set(chatIndex, forKey: "selectedChatIndex")
-            advertiseSelection(type: "chat-selected", delta: boundedDelta)
-        }
-
-        pulseFeedback(.waving)
+        let chats = directChatPickerItems
+        guard !chats.isEmpty else { return }
+        let currentIndex = chats.firstIndex(where: { $0.chat == selectedChatID }) ?? 0
+        let nextIndex = wrappedIndex(currentIndex + boundedDelta, count: chats.count)
+        selectPickerItem(chats[nextIndex])
     }
 
     func toggleCrownTarget() {
@@ -791,9 +836,11 @@ final class CompanionViewModel: ObservableObject {
         hasUnreadMessage = false
         transcriptReview = nil
         messageReader = nil
+        conversation = nil
         statusFullBody = nil
         showingPicker = false
         showingOnboarding = false
+        showingConversation = false
         resetWaveform()
 
         switch scenario {
@@ -859,6 +906,69 @@ final class CompanionViewModel: ObservableObject {
             statusTitle = selectedPet.displayName
             statusBody = "Bridge ready"
             visualState = .idle
+        case "picker-chat-open":
+            let chat = CodexPickerItem(
+                id: "thread-open",
+                title: "Openable Chat",
+                subtitle: "Just now",
+                kind: "chat",
+                section: "chats",
+                project: "project:/tmp/demo",
+                chat: "thread-open",
+                projectIndex: 0,
+                chatIndex: 0
+            )
+            pickerItems = [chat]
+            applyPickerItemSelection(chat)
+            showingPicker = true
+            statusTitle = selectedPet.displayName
+            statusBody = "Bridge ready"
+            visualState = .idle
+        case "crown-home":
+            let chats = [
+                CodexPickerItem(
+                    id: "thread-one",
+                    title: "First Chat",
+                    subtitle: "1m ago",
+                    kind: "chat",
+                    section: "chats",
+                    project: "project:/tmp/demo",
+                    chat: "thread-one",
+                    projectIndex: 0,
+                    chatIndex: 0
+                ),
+                CodexPickerItem(
+                    id: "thread-two",
+                    title: "Second Chat",
+                    subtitle: "2m ago",
+                    kind: "chat",
+                    section: "chats",
+                    project: "project:/tmp/demo",
+                    chat: "thread-two",
+                    projectIndex: 0,
+                    chatIndex: 1
+                )
+            ]
+            pickerItems = chats
+            applyPickerItemSelection(chats[1])
+            statusTitle = selectedPet.displayName
+            statusBody = "Bridge ready"
+            visualState = .idle
+        case "conversation":
+            conversation = ConversationThread(
+                id: "thread-history",
+                title: "History Chat",
+                entries: [
+                    ConversationEntry(id: "user-1", turnID: "turn-1", role: "user", text: "First question"),
+                    ConversationEntry(id: "agent-1", turnID: "turn-1", role: "assistant", text: "First answer")
+                ],
+                hasMore: false,
+                error: nil
+            )
+            showingConversation = true
+            statusTitle = selectedPet.displayName
+            statusBody = "Bridge ready"
+            visualState = .idle
         default:
             break
         }
@@ -903,9 +1013,6 @@ final class CompanionViewModel: ObservableObject {
         case "state":
             if let items = message.items {
                 updatePickerItems(items)
-            }
-            if let pet = message.pet {
-                selectedPet = CodexPet.pet(id: pet)
             }
             if message.project != nil || message.chat != nil || message.projectIndex != nil || message.chatIndex != nil || message.newChat != nil {
                 applySelection(message)
@@ -956,6 +1063,16 @@ final class CompanionViewModel: ObservableObject {
             clearPersistedVisibleTask()
         case "selection", "selection-focus", "project-selected", "chat-selected":
             applySelection(message)
+        case "conversation":
+            let chatID = message.chat ?? selectedChatID
+            conversation = ConversationThread(
+                id: chatID,
+                title: message.title ?? currentChatTitle,
+                entries: message.entries ?? [],
+                hasMore: message.hasMore ?? false,
+                error: message.body
+            )
+            showingConversation = true
         default:
             statusBody = message.text ?? message.body ?? statusBody
         }
@@ -1052,6 +1169,44 @@ final class CompanionViewModel: ObservableObject {
 
     private func updatePickerItems(_ items: [CodexPickerItem]) {
         pickerItems = items
+        guard !selectedNewChat, currentChatItem == nil else { return }
+        let indexed = directChatPickerItems.first { item in
+            item.projectIndex == projectIndex && item.chatIndex == chatIndex
+        }
+        if let resolved = indexed ?? directChatPickerItems.first {
+            applyPickerItemSelection(resolved)
+        }
+    }
+
+    private var currentChatItem: CodexPickerItem? {
+        directChatPickerItems.first { $0.chat == selectedChatID }
+    }
+
+    @discardableResult
+    private func applyPickerItemSelection(_ item: CodexPickerItem) -> CrownSelectionTarget {
+        let target = pickerTarget(for: item)
+        crownTarget = target
+        defaults.set(crownTarget.rawValue, forKey: "crownTarget")
+
+        if let projectIndex = item.projectIndex {
+            self.projectIndex = projectIndex
+            defaults.set(projectIndex, forKey: "selectedProjectIndex")
+        }
+        if let chatIndex = item.chatIndex {
+            self.chatIndex = chatIndex
+            defaults.set(chatIndex, forKey: "selectedChatIndex")
+        }
+        if let project = item.project, !project.isEmpty {
+            selectedProjectOverride = project
+        } else if target == .project {
+            selectedProjectOverride = nil
+        }
+        if let chat = item.chat, !chat.isEmpty {
+            selectedChatOverride = chat
+        } else if target == .chat {
+            selectedChatOverride = nil
+        }
+        return target
     }
 
     private func isUnread(_ item: CodexPickerItem) -> Bool {
@@ -1108,7 +1263,11 @@ final class CompanionViewModel: ObservableObject {
     }
 
     private func wrappedIndex(_ index: Int) -> Int {
-        let count = 100
+        wrappedIndex(index, count: 100)
+    }
+
+    private func wrappedIndex(_ index: Int, count: Int) -> Int {
+        guard count > 0 else { return 0 }
         return (index % count + count) % count
     }
 

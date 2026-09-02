@@ -288,6 +288,43 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertEqual(socket.sentMessages.last?.type, "chat-selected")
     }
 
+    func testRotatingCrownSelectsTheNextRealChatAndUpdatesHomePreview() async {
+        let model = makeModel()
+        let first = CodexPickerItem(
+            id: "thread-one",
+            title: "First Chat",
+            subtitle: "1m ago",
+            kind: "chat",
+            section: "chats",
+            project: "project:/tmp/demo",
+            chat: "thread-one",
+            projectIndex: 0,
+            chatIndex: 0
+        )
+        let second = CodexPickerItem(
+            id: "thread-two",
+            title: "Second Chat",
+            subtitle: "2m ago",
+            kind: "chat",
+            section: "chats",
+            project: "project:/tmp/demo",
+            chat: "thread-two",
+            projectIndex: 0,
+            chatIndex: 1
+        )
+
+        socket.emit(BridgeMessage(type: "picker-items", items: [first, second]))
+        await Task.yield()
+        model.selectPickerItem(first)
+        model.rotateCrown(delta: 1)
+
+        XCTAssertEqual(model.currentChatTitle, "Second Chat")
+        XCTAssertEqual(model.currentChatSubtitle, "2m ago")
+        XCTAssertEqual(socket.sentMessages.last?.type, "chat-selected")
+        XCTAssertEqual(socket.sentMessages.last?.chat, "thread-two")
+        XCTAssertEqual(socket.sentMessages.last?.project, "project:/tmp/demo")
+    }
+
     func testSelectingMascotAdvertisesPetSelection() {
         let model = makeModel()
         let pet = CodexPet.builtIns.first { $0.id == "fireball" }!
@@ -298,6 +335,83 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertEqual(model.statusTitle, "Fireball")
         XCTAssertEqual(socket.sentMessages.last?.type, "pet-selected")
         XCTAssertEqual(socket.sentMessages.last?.pet, "fireball")
+    }
+
+    func testIncomingBridgeStateCannotOverwriteWatchSelectedPet() async {
+        defaults.set("fireball", forKey: "selectedPetID")
+        let model = makeModel()
+
+        socket.emit(BridgeMessage(
+            type: "state",
+            pet: "codex",
+            state: "thinking",
+            title: "Codex is thinking",
+            body: "Working on it"
+        ))
+        await Task.yield()
+
+        XCTAssertEqual(model.selectedPet.id, "fireball")
+    }
+
+    func testOpeningChatRequestsAndDisplaysConversationHistory() async {
+        let model = makeModel()
+        model.connect()
+        await Task.yield()
+        socket.sentMessages.removeAll()
+        let chat = CodexPickerItem(
+            id: "thread-history",
+            title: "History Chat",
+            subtitle: "Just now",
+            kind: "chat",
+            section: "chats",
+            project: "project:/tmp/demo",
+            chat: "thread-history",
+            projectIndex: 0,
+            chatIndex: 0
+        )
+
+        model.openChat(chat)
+
+        XCTAssertTrue(model.showingConversation)
+        XCTAssertEqual(model.conversation?.title, "History Chat")
+        XCTAssertNil(model.conversation?.entries)
+        XCTAssertEqual(socket.sentMessages.last?.type, "chat-opened")
+
+        socket.emit(BridgeMessage(
+            type: "conversation",
+            title: "History Chat",
+            chat: "thread-history",
+            entries: [
+                ConversationEntry(id: "user-1", turnID: "turn-1", role: "user", text: "Question"),
+                ConversationEntry(id: "agent-1", turnID: "turn-1", role: "assistant", text: "Answer")
+            ],
+            hasMore: false
+        ))
+        await Task.yield()
+
+        XCTAssertEqual(model.conversation?.entries?.map(\.text), ["Question", "Answer"])
+        XCTAssertEqual(model.conversation?.hasMore, false)
+    }
+
+    func testOpeningChatWhileDisconnectedShowsAnImmediateError() {
+        let model = makeModel()
+        let chat = CodexPickerItem(
+            id: "thread-offline",
+            title: "Offline Chat",
+            kind: "chat",
+            section: "chats",
+            project: "project:/tmp/demo",
+            chat: "thread-offline",
+            projectIndex: 0,
+            chatIndex: 0
+        )
+
+        model.openChat(chat)
+
+        XCTAssertTrue(model.showingConversation)
+        XCTAssertEqual(model.conversation?.entries?.count, 0)
+        XCTAssertEqual(model.conversation?.error, "Connect to the Bridge to open chats.")
+        XCTAssertTrue(socket.sentMessages.isEmpty)
     }
 
     func testDesktopPetStatesAreRecognized() {

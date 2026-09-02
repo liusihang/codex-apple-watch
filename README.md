@@ -27,7 +27,7 @@ xcrun devicectl list devices
 
 Codex Watch Companion is a proof-of-concept Apple Watch app for keeping a Codex pet visible while a Mac runs Codex. The watch talks to a small bridge process on the Mac over WebSocket/HTTP, streams microphone audio to the bridge, sends transcripts into the selected Codex chat, and receives task state plus reply text back.
 
-The first screen is intentionally just the pet. Tap for voice mode, long-press for project/chat selection, and use the Digital Crown to move through active projects or chats.
+The first screen shows the pet plus the currently selected chat. Tap the pet for voice mode, tap the chat preview to read it, long-press the pet for project/chat selection, and use the Digital Crown to move through real chats.
 
 ## What Works
 
@@ -42,6 +42,7 @@ The first screen is intentionally just the pet. Tap for voice mode, long-press f
 - Project/chat sections capped to six rows with `View all` controls for larger histories.
 - Voice transcript review and send flow.
 - Streaming reply previews from Codex app-server turn events.
+- Scrollable conversation history with the most recent 20 user/assistant messages.
 - Markdown rendering in full message view, including inline code/link attributes.
 - Haptics for send, reply, transcript, and failure states.
 - Durable unread/thinking state across watch app restarts and bridge reconnects, plus app-open state refresh for the selected chat.
@@ -198,7 +199,8 @@ The bridge keeps `GET /` available as a minimal health check. WebSocket upgrades
 - Long-press pet: open project/chat picker.
 - Bridge Settings in the picker: set the local or remote bridge URL and bearer token.
 - New Chat: start a fresh Codex thread for the selected project.
-- Digital Crown: move through the current project/chat target.
+- Digital Crown: cycle through real Codex chats; the current chat title is shown below the pet.
+- Current chat preview or a chat row: open the most recent 20 user/assistant messages.
 - Double Tap: open visible text if present, otherwise start voice mode.
 - Reply button in message view: scroll to the bottom of the message and tap `Reply`.
 
@@ -213,6 +215,8 @@ The bridge sends these watch-visible states:
 - `failed`: an error needs attention.
 
 Unread replies and thinking/running task cards are persisted locally on the watch. The bridge also replays the last durable task state when the watch reconnects, and on app open asks Codex app-server for the selected chat state so completed replies or active work are restored when possible. Opening a message marks it read and clears the replay state for the current project/chat.
+
+Chat selection and chat opening are separate protocol actions. `chat-selected` updates the current target while Crown scrolling; `chat-opened` requests conversation content. The bridge reads persisted session JSONL first, supports current and legacy message records, and uses paginated app-server history when a local session is unavailable. Pet and chat selections remain isolated per connected Watch client.
 
 ## Development
 
@@ -255,7 +259,10 @@ CODEX_WATCH_UI_TEST_SCENARIO=thinking
 CODEX_WATCH_UI_TEST_SCENARIO=voice
 CODEX_WATCH_UI_TEST_SCENARIO=picker
 CODEX_WATCH_UI_TEST_SCENARIO=picker-many
+CODEX_WATCH_UI_TEST_SCENARIO=picker-chat-open
 CODEX_WATCH_UI_TEST_SCENARIO=onboarding
+CODEX_WATCH_UI_TEST_SCENARIO=crown-home
+CODEX_WATCH_UI_TEST_SCENARIO=conversation
 ```
 
 Screenshots captured during release prep live in:

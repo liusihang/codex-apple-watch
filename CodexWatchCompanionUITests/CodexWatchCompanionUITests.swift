@@ -151,6 +151,38 @@ final class CodexWatchCompanionUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Project 1"].exists)
     }
 
+    func testHomeShowsCurrentChatPreview() {
+        let app = launchApp(scenario: "crown-home")
+
+        XCTAssertTrue(app.buttons["current-chat-preview"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Second Chat"].exists)
+    }
+
+    func testConversationShowsOrderedUserAndAssistantMessages() {
+        let app = launchApp(scenario: "conversation")
+
+        XCTAssertTrue(app.descendants(matching: .any)["conversation-reader"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["You"].exists)
+        XCTAssertTrue(app.staticTexts["Codex"].exists)
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "First question")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "First answer")).firstMatch.exists)
+    }
+
+    func testPickerChatTapDismissesPickerAndOpensConversationReader() {
+        let app = launchApp(scenario: "picker-chat-open")
+        let chat = app.buttons["picker-chat-thread-open"]
+
+        XCTAssertTrue(app.buttons["picker-new-chat-button"].waitForExistence(timeout: 5))
+        for _ in 0..<12 where !chat.exists {
+            scrollPickerUp(in: app)
+        }
+        XCTAssertTrue(chat.waitForExistence(timeout: 5))
+        chat.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["conversation-reader"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Loading chat"].exists)
+    }
+
     private func launchApp(scenario: String) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["--ui-testing"]

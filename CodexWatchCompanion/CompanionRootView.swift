@@ -26,6 +26,9 @@ struct CompanionRootView: View {
                 }
             )
         }
+        .sheet(isPresented: $model.showingConversation) {
+            ConversationReaderView(model: model)
+        }
     }
 }
 
@@ -45,20 +48,29 @@ private struct CompanionWatchContent: View {
                         ActiveTaskPetView(model: model, canvasSize: proxy.size)
                             .transition(.scale(scale: 0.92).combined(with: .opacity))
                     } else {
-                        PetControlButton(
-                            pet: model.selectedPet,
-                            state: model.petDisplayState,
-                            size: petSize(in: proxy.size),
-                            label: model.primaryShortcutLabel,
-                            identifier: "primary-hand-gesture-shortcut",
-                            isPrimaryHandShortcut: true,
-                            action: {
-                                model.performPrimaryShortcut()
-                            },
-                            longPress: {
-                                model.showPicker()
-                            }
-                        )
+                        VStack(spacing: 5) {
+                            PetControlButton(
+                                pet: model.selectedPet,
+                                state: model.petDisplayState,
+                                size: petSize(in: proxy.size),
+                                label: model.primaryShortcutLabel,
+                                identifier: "primary-hand-gesture-shortcut",
+                                isPrimaryHandShortcut: true,
+                                action: {
+                                    model.performPrimaryShortcut()
+                                },
+                                longPress: {
+                                    model.showPicker()
+                                }
+                            )
+
+                            CurrentChatPreview(
+                                title: model.currentChatTitle,
+                                subtitle: model.currentChatSubtitle,
+                                isEnabled: model.canOpenCurrentChat,
+                                action: model.openSelectedChat
+                            )
+                        }
                             .transition(.scale(scale: 0.84).combined(with: .opacity))
                     }
                 }
@@ -123,6 +135,36 @@ private struct CompanionWatchContent: View {
         let maxWidth = size.width * 0.62
         let width = min(maxWidth, maxHeight * codexPetFrameAspect)
         return CGSize(width: width, height: width / codexPetFrameAspect)
+    }
+}
+
+private struct CurrentChatPreview: View {
+    let title: String
+    let subtitle: String
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 1) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .regular, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: 178)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .accessibilityIdentifier("current-chat-preview")
+        .accessibilityLabel("Current chat, \(title), \(subtitle)")
     }
 }
 
@@ -399,8 +441,10 @@ private struct ProjectChatPickerView: View {
             }
         } else {
             Button {
-                model.selectPickerItem(item)
                 dismiss()
+                Task { @MainActor in
+                    model.openChat(item)
+                }
             } label: {
                 PickerItemRow(
                     item: item,
@@ -409,6 +453,7 @@ private struct ProjectChatPickerView: View {
                 )
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("picker-chat-\(item.id)")
         }
     }
 }
@@ -628,8 +673,10 @@ private struct ProjectChatsView: View {
                 }
                 ForEach(visibleChats) { chat in
                     Button {
-                        model.selectPickerItem(chat)
                         dismissPicker()
+                        Task { @MainActor in
+                            model.openChat(chat)
+                        }
                     } label: {
                         PickerItemRow(
                             item: chat,
@@ -638,6 +685,7 @@ private struct ProjectChatsView: View {
                         )
                     }
                     .buttonStyle(.plain)
+                    .accessibilityIdentifier("picker-chat-\(chat.id)")
                 }
             }
 
@@ -882,6 +930,93 @@ private struct MessageReaderView: View {
         text.split { character in
             character.isWhitespace || character.isNewline
         }.count
+    }
+}
+
+private struct ConversationReaderView: View {
+    @ObservedObject var model: CompanionViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let conversation = model.conversation {
+                    if let entries = conversation.entries {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 10) {
+                                if conversation.hasMore {
+                                    Text("Showing the latest 20 messages")
+                                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .center)
+                                }
+
+                                if entries.isEmpty {
+                                    Text(conversation.error ?? "No messages in this chat")
+                                        .font(.system(size: 13, weight: .regular, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity, alignment: .center)
+                                        .padding(.vertical, 20)
+                                } else {
+                                    ForEach(entries) { entry in
+                                        ConversationEntryView(entry: entry)
+                                    }
+                                }
+
+                                Button {
+                                    model.replyToConversation()
+                                } label: {
+                                    Label("Reply", systemImage: "mic.fill")
+                                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .padding(.top, 4)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 10)
+                        }
+                    } else {
+                        ProgressView("Loading chat")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+            }
+            .background(.black)
+            .navigationTitle(model.conversation?.title ?? "Conversation")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        model.closeConversation()
+                        dismiss()
+                    } label: {
+                        Image(systemName: "xmark")
+                    }
+                }
+            }
+        }
+        .accessibilityIdentifier("conversation-reader")
+    }
+}
+
+private struct ConversationEntryView: View {
+    let entry: ConversationEntry
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(entry.role == "user" ? "You" : "Codex")
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(entry.role == "user" ? .blue : .green)
+            MarkdownText(markdown: entry.text, size: 13, lineSpacing: 2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(9)
+        .background(
+            entry.role == "user" ? Color.blue.opacity(0.16) : Color.white.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(entry.role == "user" ? "You" : "Codex"): \(entry.text)")
     }
 }
 
