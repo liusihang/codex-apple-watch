@@ -78,6 +78,7 @@ CODEX_WATCH_BUNDLE_ID=com.example.codexwatch \
 CODEX_WATCH_DEVELOPMENT_TEAM=<PERSONAL_TEAM_ID> \
 CODEX_WATCH_SERVER_URL=wss://watch.example.com/codex-watch \
 CODEX_WATCH_AUTH_TOKEN='<saved-token>' \
+CODEX_WATCH_PROXY_URL='http://192.168.2.201:7897' \
 ./scripts/install.sh --device <APPLE_WATCH_DEVICE_ID>
 ```
 
@@ -131,6 +132,14 @@ ws://127.0.0.1:17842/codex-watch
 ```
 
 Set `CODEX_WATCH_OPEN_CODEX=1` if you want the bridge to open `/Applications/Codex.app` when the watch connects.
+
+Set `CODEX_WATCH_PROXY_URL` when the Mac needs an outbound proxy for Codex Desktop transcription or the optional OpenAI transcription fallback. The supervisor maps it to Node's HTTP/HTTPS proxy settings while keeping loopback traffic direct. Proxy mode requires a Node.js release that supports `--use-env-proxy`.
+
+```sh
+CODEX_WATCH_PROXY_URL='http://192.168.2.201:7897' \
+CODEX_WATCH_AUTH_TOKEN='<saved-token>' \
+./scripts/install.sh --bridge-only
+```
 
 Set `CODEX_WATCH_AUTH_TOKEN` to require the same bearer token from the watch for WebSocket and HTTP fallback requests:
 

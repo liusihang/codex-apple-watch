@@ -36,6 +36,7 @@ BRIDGE_ENV_NAMES=(
   CODEX_WATCH_LOCAL_HOSTNAME
   CODEX_WATCH_OPEN_CODEX
   CODEX_WATCH_PORT
+  CODEX_WATCH_PROXY_URL
   CODEX_WATCH_RESTART_DELAY
   CODEX_WATCH_SHOW_NETWORK_HINTS
   CODEX_WATCH_TRANSCRIBE_PROVIDER
@@ -67,6 +68,7 @@ Environment:
   CODEX_WATCH_SHOW_NETWORK_HINTS=1
                                 Print LAN/hostname bridge URLs in the bridge log.
   CODEX_WATCH_OPEN_CODEX=1      Open /Applications/Codex.app when the watch connects.
+  CODEX_WATCH_PROXY_URL          Outbound HTTP(S) proxy used by Node fetch calls.
   CODEX_WATCH_RESTART_DELAY     Seconds before restarting a crashed bridge. Default: 2.
 
 Find a physical device id:
