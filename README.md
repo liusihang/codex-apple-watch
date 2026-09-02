@@ -70,6 +70,14 @@ Useful modes:
 ./scripts/install.sh --test --device <APPLE_WATCH_DEVICE_ID>
 ```
 
+For a free Personal Team, pass a unique bundle identifier and the team ID shown by Xcode:
+
+```sh
+CODEX_WATCH_BUNDLE_ID=com.example.codexwatch \
+CODEX_WATCH_DEVELOPMENT_TEAM=<PERSONAL_TEAM_ID> \
+./scripts/install.sh --device <APPLE_WATCH_DEVICE_ID>
+```
+
 The bridge log is written to:
 
 ```text

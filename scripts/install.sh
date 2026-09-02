@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="$ROOT_DIR/CodexWatchCompanion.xcodeproj"
 SCHEME="CodexWatchCompanion"
 BUNDLE_ID="${CODEX_WATCH_BUNDLE_ID:-dev.codexwatchcompanion}"
+DEVELOPMENT_TEAM="${CODEX_WATCH_DEVELOPMENT_TEAM:-}"
 DERIVED_DATA="$ROOT_DIR/build/DerivedData"
 WATCH_APP="$DERIVED_DATA/Build/Products/Debug-watchos/CodexWatchCompanion.app"
 SIM_APP="$DERIVED_DATA/Build/Products/Debug-watchsimulator/CodexWatchCompanion.app"
@@ -15,6 +16,11 @@ DEVICE_ID="${CODEX_WATCH_DEVICE_ID:-}"
 MODE="device"
 START_BRIDGE=1
 RUN_TESTS=0
+BUNDLE_BUILD_SETTING=("PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID")
+DEVICE_BUILD_SETTINGS=("${BUNDLE_BUILD_SETTING[@]}")
+if [[ -n "$DEVELOPMENT_TEAM" ]]; then
+  DEVICE_BUILD_SETTINGS+=("DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM")
+fi
 BRIDGE_ENV_NAMES=(
   CODEX_WATCH_AUTH_TOKEN
   CODEX_SESSIONS_DIR
@@ -48,7 +54,8 @@ Environment:
   CODEX_WATCH_AUTH_TOKEN        Require this bearer token for Watch bridge requests.
   CODEX_WATCH_DEVICE_ID         Physical watch CoreDevice identifier.
   CODEX_WATCH_SIMULATOR_NAME    watchOS simulator name. Default: Apple Watch Series 11 (46mm).
-  CODEX_WATCH_BUNDLE_ID         Bundle identifier to launch. Default: dev.codexwatchcompanion.
+  CODEX_WATCH_BUNDLE_ID         Bundle identifier to build, install, and launch. Default: dev.codexwatchcompanion.
+  CODEX_WATCH_DEVELOPMENT_TEAM  Apple development team identifier for device signing.
   CODEX_WATCH_SHOW_NETWORK_HINTS=1
                                 Print LAN/hostname bridge URLs in the bridge log.
   CODEX_WATCH_OPEN_CODEX=1      Open /Applications/Codex.app when the watch connects.
@@ -172,6 +179,8 @@ install_device() {
     -destination "generic/platform=watchOS" \
     -derivedDataPath "$DERIVED_DATA" \
     -allowProvisioningUpdates \
+    -allowProvisioningDeviceRegistration \
+    "${DEVICE_BUILD_SETTINGS[@]}" \
     build
 
   xcrun devicectl device install app \
@@ -191,6 +200,7 @@ install_simulator() {
     -scheme "$SCHEME" \
     -destination "platform=watchOS Simulator,name=$SIMULATOR_NAME" \
     -derivedDataPath "$DERIVED_DATA" \
+    "${BUNDLE_BUILD_SETTING[@]}" \
     build
 
   xcrun simctl boot "$SIMULATOR_NAME" >/dev/null 2>&1 || true
