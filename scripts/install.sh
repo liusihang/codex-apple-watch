@@ -16,6 +16,7 @@ MODE="device"
 START_BRIDGE=1
 RUN_TESTS=0
 BRIDGE_ENV_NAMES=(
+  CODEX_WATCH_AUTH_TOKEN
   CODEX_SESSIONS_DIR
   CODEX_WATCH_CODEX_API_BASE_URL
   CODEX_WATCH_HOST
@@ -44,6 +45,7 @@ Options:
   --help            Show this help.
 
 Environment:
+  CODEX_WATCH_AUTH_TOKEN        Require this bearer token for Watch bridge requests.
   CODEX_WATCH_DEVICE_ID         Physical watch CoreDevice identifier.
   CODEX_WATCH_SIMULATOR_NAME    watchOS simulator name. Default: Apple Watch Series 11 (46mm).
   CODEX_WATCH_BUNDLE_ID         Bundle identifier to launch. Default: dev.codexwatchcompanion.

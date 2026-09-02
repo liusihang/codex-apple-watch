@@ -116,6 +116,18 @@ final class CodexWatchCompanionUITests: XCTestCase {
         XCTAssertTrue(codexMascot.waitForExistence(timeout: 5))
     }
 
+    func testBridgeSettingsAreReachableFromPicker() {
+        let app = launchApp(scenario: "picker")
+        let settings = app.buttons["bridge-settings-link"]
+
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+
+        XCTAssertTrue(app.textFields["bridge-url-field"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.secureTextFields["bridge-token-field"].exists)
+        XCTAssertTrue(app.buttons["bridge-connect-button"].exists)
+    }
+
     func testPickerLimitsProjectAndChatSectionsWithViewAll() {
         let app = launchApp(scenario: "picker-many")
 

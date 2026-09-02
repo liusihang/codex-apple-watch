@@ -5,7 +5,7 @@ protocol WatchSocketClienting: AnyObject {
     var onMessage: ((BridgeMessage) -> Void)? { get set }
     var onStateChange: ((ConnectionState) -> Void)? { get set }
 
-    func connect(to url: URL, hello: BridgeMessage)
+    func connect(to url: URL, token: String, hello: BridgeMessage)
     func disconnect()
     func send(_ message: BridgeMessage)
 }
@@ -21,6 +21,7 @@ final class WatchSocketClient: WatchSocketClienting {
     private var isHTTPReady = false
     private var httpTarget: WebSocketTarget?
     private var httpPollTask: Task<Void, Never>?
+    private var authorization = BridgeAuthorization(token: "")!
     private let httpClientID = "codex-watch"
     private lazy var probeSession: URLSession = {
         let configuration = URLSessionConfiguration.default
@@ -40,20 +41,26 @@ final class WatchSocketClient: WatchSocketClienting {
     private var didStartPathMonitor = false
     private var didRunNetworkProbes = false
 
-    func connect(to url: URL, hello: BridgeMessage) {
+    func connect(to url: URL, token: String, hello: BridgeMessage) {
         closeCurrentConnection(notify: false)
         startPathMonitor()
         runNetworkProbes()
         onStateChange?(.connecting)
 
+        guard let authorization = BridgeAuthorization(token: token) else {
+            onMessage?(BridgeMessage(type: "error", body: "Invalid bridge token"))
+            onStateChange?(.disconnected)
+            return
+        }
         guard let target = WebSocketTarget(url: url) else {
             onMessage?(BridgeMessage(type: "error", body: "Invalid WebSocket URL"))
             onStateChange?(.disconnected)
             return
         }
+        self.authorization = authorization
 
         print("CodexWatch socket connecting \(url.absoluteString)")
-        let connection = NWConnection(host: target.host, port: target.port, using: .tcp)
+        let connection = NWConnection(host: target.host, port: target.port, using: target.parameters)
         self.connection = connection
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection, self.connection === connection else { return }
@@ -114,16 +121,7 @@ final class WatchSocketClient: WatchSocketClienting {
 
     private func sendHandshake(on connection: NWConnection, target: WebSocketTarget, hello: BridgeMessage) {
         let key = randomBytes(count: 16).base64EncodedString()
-        let request = [
-            "GET \(target.path) HTTP/1.1",
-            "Host: \(target.hostHeader)",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            "Sec-WebSocket-Key: \(key)",
-            "Sec-WebSocket-Version: 13",
-            "",
-            ""
-        ].joined(separator: "\r\n")
+        let request = authorization.webSocketHandshakeRequest(target: target, key: key)
 
         connection.send(content: Data(request.utf8), completion: .contentProcessed { [weak self, weak connection] error in
             guard let self, let connection, self.connection === connection else { return }
@@ -290,7 +288,7 @@ final class WatchSocketClient: WatchSocketClienting {
     private func sendHTTP(_ message: BridgeMessage, marksConnected: Bool = false) {
         guard let url = httpTarget?.httpURL(endpoint: "message", clientID: httpClientID) else { return }
         do {
-            var request = URLRequest(url: url)
+            var request = authorization.request(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "content-type")
             request.httpBody = try encoder.encode(message)
@@ -330,8 +328,11 @@ final class WatchSocketClient: WatchSocketClienting {
     private func pollHTTPOnce() async {
         guard isHTTPReady, let url = httpTarget?.httpURL(endpoint: "poll", clientID: httpClientID) else { return }
         do {
-            let (data, response) = try await probeSession.data(from: url)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+            let (data, response) = try await probeSession.data(for: authorization.request(url: url))
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                handleHTTPError(SocketError.httpFailed)
+                return
+            }
             decodeHTTPEnvelope(data)
         } catch {
             print("CodexWatch http poll error \(error.localizedDescription)")
@@ -418,32 +419,76 @@ final class WatchSocketClient: WatchSocketClienting {
     }
 }
 
-private struct WebSocketTarget {
+struct BridgeAuthorization {
+    let headerValue: String?
+
+    init?(token: String) {
+        let normalizedToken = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let containsLineBreak = normalizedToken.unicodeScalars.contains {
+            $0.value == 0x0D || $0.value == 0x0A
+        }
+        guard !containsLineBreak else { return nil }
+        self.headerValue = normalizedToken.isEmpty ? nil : "Bearer \(normalizedToken)"
+    }
+
+    func webSocketHandshakeRequest(target: WebSocketTarget, key: String) -> String {
+        var headers = [
+            "GET \(target.path) HTTP/1.1",
+            "Host: \(target.hostHeader)",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            "Sec-WebSocket-Key: \(key)",
+            "Sec-WebSocket-Version: 13"
+        ]
+        if let headerValue {
+            headers.append("Authorization: \(headerValue)")
+        }
+        return "\(headers.joined(separator: "\r\n"))\r\n\r\n"
+    }
+
+    func request(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        if let headerValue {
+            request.setValue(headerValue, forHTTPHeaderField: "Authorization")
+        }
+        return request
+    }
+}
+
+struct WebSocketTarget {
     let url: URL
     let host: NWEndpoint.Host
     let port: NWEndpoint.Port
     let path: String
     let hostHeader: String
+    let usesTLS: Bool
 
     init?(url: URL) {
-        guard let hostString = url.host else { return nil }
-        let portNumber = url.port ?? (url.scheme == "wss" ? 443 : 80)
-        guard let port = NWEndpoint.Port(rawValue: UInt16(portNumber)) else { return nil }
+        guard let scheme = url.scheme?.lowercased(), scheme == "ws" || scheme == "wss" else { return nil }
+        guard let hostString = url.host, !hostString.isEmpty else { return nil }
+        let usesTLS = scheme == "wss"
+        let portNumber = url.port ?? (usesTLS ? 443 : 80)
+        guard let rawPort = UInt16(exactly: portNumber), let port = NWEndpoint.Port(rawValue: rawPort) else { return nil }
         let basePath = url.path.isEmpty ? "/" : url.path
         self.url = url
         self.host = NWEndpoint.Host(hostString)
         self.port = port
         self.path = url.query.map { "\(basePath)?\($0)" } ?? basePath
         self.hostHeader = url.port.map { "\(hostString):\($0)" } ?? hostString
+        self.usesTLS = usesTLS
+    }
+
+    var parameters: NWParameters {
+        usesTLS ? .tls : .tcp
     }
 
     func httpURL(endpoint: String, clientID: String) -> URL? {
         var components = URLComponents()
-        components.scheme = url.scheme == "wss" ? "https" : "http"
+        components.scheme = usesTLS ? "https" : "http"
         components.host = url.host
         components.port = url.port
         let basePath = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        components.path = "/\(basePath)/\(endpoint)"
+        components.path = basePath.isEmpty ? "/\(endpoint)" : "/\(basePath)/\(endpoint)"
         components.queryItems = [URLQueryItem(name: "client", value: clientID)]
         return components.url
     }

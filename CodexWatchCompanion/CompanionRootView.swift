@@ -12,9 +12,6 @@ struct CompanionRootView: View {
         .ignoresSafeArea()
         ._statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
-        .sheet(isPresented: $model.showingSettings) {
-            SettingsView(model: model)
-        }
         .sheet(isPresented: $model.showingPicker) {
             ProjectChatPickerView(model: model)
         }
@@ -256,6 +253,15 @@ private struct ProjectChatPickerView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Connection") {
+                    NavigationLink {
+                        SettingsView(model: model)
+                    } label: {
+                        Label("Bridge Settings", systemImage: "network")
+                    }
+                    .accessibilityIdentifier("bridge-settings-link")
+                }
+
                 Section {
                     Button {
                         model.startNewChat()
@@ -416,6 +422,15 @@ private struct OnboardingView: View {
     var body: some View {
         NavigationStack {
             List {
+                Section("Connection") {
+                    NavigationLink {
+                        SettingsView(model: model)
+                    } label: {
+                        Label("Bridge Settings", systemImage: "network")
+                    }
+                    .accessibilityIdentifier("onboarding-bridge-settings-link")
+                }
+
                 Section("Mascot") {
                     ForEach(CodexPet.builtIns) { pet in
                         Button {
@@ -1050,6 +1065,12 @@ private struct SettingsView: View {
             TextField("Bridge URL", text: $model.serverURLString)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
+                .accessibilityIdentifier("bridge-url-field")
+
+            SecureField("Bridge Token", text: $model.bridgeToken)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+                .accessibilityIdentifier("bridge-token-field")
 
             Button {
                 model.connect()
@@ -1057,6 +1078,7 @@ private struct SettingsView: View {
             } label: {
                 Label("Connect", systemImage: "bolt.horizontal.fill")
             }
+            .accessibilityIdentifier("bridge-connect-button")
 
             Button {
                 dismiss()

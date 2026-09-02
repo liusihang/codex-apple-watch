@@ -11,6 +11,7 @@ final class CompanionViewModelTests: XCTestCase {
     private var audio: MockAudio!
     private var runtime: MockRuntimeKeeper!
     private var haptics: MockHaptics!
+    private var storedBridgeToken: String?
 
     override func setUp() {
         super.setUp()
@@ -21,6 +22,7 @@ final class CompanionViewModelTests: XCTestCase {
         audio = MockAudio()
         runtime = MockRuntimeKeeper()
         haptics = MockHaptics()
+        storedBridgeToken = nil
     }
 
     override func tearDown() {
@@ -31,6 +33,7 @@ final class CompanionViewModelTests: XCTestCase {
         audio = nil
         runtime = nil
         haptics = nil
+        storedBridgeToken = nil
         super.tearDown()
     }
 
@@ -376,13 +379,76 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertGreaterThan(model.waveformLevels.max() ?? 0, 0.8)
     }
 
+    func testBridgeConfigurationPersistsAcrossModelRecreation() {
+        let model = makeModel()
+        model.serverURLString = "wss://watch.example.com/codex-watch"
+        model.bridgeToken = "saved-secret"
+
+        let restored = makeModel()
+
+        XCTAssertEqual(restored.serverURLString, "wss://watch.example.com/codex-watch")
+        XCTAssertEqual(restored.bridgeToken, "saved-secret")
+    }
+
+    func testConnectPassesConfiguredURLAndTokenToSocket() {
+        let model = makeModel()
+        model.serverURLString = "wss://watch.example.com/codex-watch"
+        model.bridgeToken = "watch-secret"
+
+        model.connect()
+
+        XCTAssertEqual(socket.connectedURL?.absoluteString, "wss://watch.example.com/codex-watch")
+        XCTAssertEqual(socket.connectedToken, "watch-secret")
+        XCTAssertEqual(socket.sentMessages.last?.type, "hello")
+    }
+
+    func testConnectRejectsNonWebSocketSchemes() {
+        let model = makeModel()
+        model.serverURLString = "https://watch.example.com/codex-watch"
+
+        model.connect()
+
+        XCTAssertNil(socket.connectedURL)
+        XCTAssertEqual(model.statusTitle, "Invalid URL")
+    }
+
+    func testWebSocketTargetMapsSecureAndPlainFallbacks() {
+        let secure = WebSocketTarget(url: URL(string: "WSS://watch.example.com/codex-watch")!)
+        let plain = WebSocketTarget(url: URL(string: "ws://127.0.0.1:17842/codex-watch")!)
+
+        XCTAssertTrue(secure?.usesTLS == true)
+        XCTAssertEqual(secure?.httpURL(endpoint: "poll", clientID: "watch")?.absoluteString,
+                       "https://watch.example.com/codex-watch/poll?client=watch")
+        XCTAssertTrue(plain?.usesTLS == false)
+        XCTAssertEqual(plain?.httpURL(endpoint: "message", clientID: "watch")?.absoluteString,
+                       "http://127.0.0.1:17842/codex-watch/message?client=watch")
+        XCTAssertNil(WebSocketTarget(url: URL(string: "https://watch.example.com/codex-watch")!))
+    }
+
+    func testBridgeAuthorizationBuildsWebSocketAndHTTPHeaders() {
+        let authorization = BridgeAuthorization(token: "  watch-secret  ")!
+        let target = WebSocketTarget(url: URL(string: "wss://watch.example.com/codex-watch")!)!
+        let handshake = authorization.webSocketHandshakeRequest(target: target, key: "test-key")
+        let request = authorization.request(url: target.httpURL(endpoint: "poll", clientID: "watch")!)
+
+        XCTAssertTrue(handshake.contains("Authorization: Bearer watch-secret\r\n"))
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer watch-secret")
+
+        let empty = BridgeAuthorization(token: "   ")!
+        XCTAssertFalse(empty.webSocketHandshakeRequest(target: target, key: "test-key").contains("Authorization:"))
+        XCTAssertNil(empty.request(url: URL(string: "https://watch.example.com")!).value(forHTTPHeaderField: "Authorization"))
+        XCTAssertNil(BridgeAuthorization(token: "bad\r\ntoken"))
+    }
+
     private func makeModel() -> CompanionViewModel {
         CompanionViewModel(
             socket: socket,
             audio: audio,
             runtimeKeeper: runtime,
             haptics: haptics,
-            defaults: defaults
+            defaults: defaults,
+            bridgeTokenLoader: { [weak self] in self?.storedBridgeToken },
+            bridgeTokenSaver: { [weak self] token in self?.storedBridgeToken = token }
         )
     }
 }
@@ -392,8 +458,12 @@ private final class MockSocket: WatchSocketClienting {
     var onStateChange: ((ConnectionState) -> Void)?
     var sentMessages: [BridgeMessage] = []
     var didDisconnect = false
+    var connectedURL: URL?
+    var connectedToken: String?
 
-    func connect(to url: URL, hello: BridgeMessage) {
+    func connect(to url: URL, token: String, hello: BridgeMessage) {
+        connectedURL = url
+        connectedToken = token
         sentMessages.append(hello)
         onStateChange?(.connected)
     }

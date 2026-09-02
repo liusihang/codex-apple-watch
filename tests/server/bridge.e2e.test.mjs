@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
@@ -22,15 +23,16 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     process.env.CODEX_SESSIONS_DIR = tempDir;
     process.env.CODEX_WATCH_MOCK_APP_SERVER = "1";
     process.env.CODEX_WATCH_MOCK_REPLY = "Mock **reply** with `inlineCode`.";
+    delete process.env.CODEX_WATCH_AUTH_TOKEN;
     resetBridgeStateForTests();
     server = startBridge({ port: 0, host: "127.0.0.1" });
     await once(server, "listening");
   });
 
   afterEach(async () => {
+    resetBridgeStateForTests();
     await closeServer(server);
     server = null;
-    resetBridgeStateForTests();
     if (tempDir) {
       await fs.rm(tempDir, { recursive: true, force: true });
       tempDir = null;
@@ -50,6 +52,39 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(response.messages.at(-1)?.body, "Bridge ready");
     assert.ok(response.messages.at(-1)?.items.some(item => item.chat === "thread-e2e-1"));
     assert.ok(response.messages.at(-1)?.items.some(item => item.kind === "project"));
+  });
+
+  test("WebSocket access remains available when authentication is disabled", async () => {
+    assert.equal(await websocketStatus(), 101);
+  });
+
+  test("optional bearer authentication protects every command transport", async () => {
+    process.env.CODEX_WATCH_AUTH_TOKEN = "test-secret";
+    await restartServer();
+
+    const message = { type: "hello", pet: "codex", capabilities: ["codex-pets"] };
+    for (const token of [null, "wrong-secret"]) {
+      const messageResponse = await requestMessage("auth-client", message, token);
+      assert.equal(messageResponse.status, 401);
+      assert.equal(messageResponse.body.error, "Unauthorized");
+      assert.equal(messageResponse.challenge, 'Bearer realm="codex-watch"');
+
+      const pollResponse = await requestPoll("auth-client", token);
+      assert.equal(pollResponse.status, 401);
+      assert.equal(pollResponse.body.error, "Unauthorized");
+
+      assert.equal(await websocketStatus(token), 401);
+    }
+
+    const acceptedMessage = await requestMessage("auth-client", message, "test-secret");
+    assert.equal(acceptedMessage.status, 200);
+    assert.equal(acceptedMessage.body.ok, true);
+
+    const acceptedPoll = await requestPoll("auth-client", "test-secret");
+    assert.equal(acceptedPoll.status, 200);
+    assert.equal(acceptedPoll.body.ok, true);
+
+    assert.equal(await websocketStatus("test-secret"), 101);
   });
 
   test("transcript-send starts a Codex turn and streams status events back to the watch", async () => {
@@ -374,17 +409,78 @@ function baseURL() {
 }
 
 async function postMessage(client, message) {
+  return (await requestMessage(client, message)).body;
+}
+
+async function requestMessage(client, message, token = null) {
   const response = await fetch(`${baseURL()}/codex-watch/message?client=${client}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: requestHeaders(token, { "content-type": "application/json" }),
     body: JSON.stringify(message)
   });
-  return response.json();
+  return {
+    status: response.status,
+    challenge: response.headers.get("www-authenticate"),
+    body: await response.json()
+  };
 }
 
 async function poll(client) {
-  const response = await fetch(`${baseURL()}/codex-watch/poll?client=${client}`);
-  return response.json();
+  return (await requestPoll(client)).body;
+}
+
+async function requestPoll(client, token = null) {
+  const response = await fetch(`${baseURL()}/codex-watch/poll?client=${client}`, {
+    headers: requestHeaders(token)
+  });
+  return {
+    status: response.status,
+    challenge: response.headers.get("www-authenticate"),
+    body: await response.json()
+  };
+}
+
+function requestHeaders(token, headers = {}) {
+  return token ? { ...headers, authorization: `Bearer ${token}` } : headers;
+}
+
+function websocketStatus(token = null) {
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(address.port, "127.0.0.1", () => {
+      const headers = [
+        "GET /codex-watch HTTP/1.1",
+        `Host: 127.0.0.1:${address.port}`,
+        "Connection: Upgrade",
+        "Upgrade: websocket",
+        `Sec-WebSocket-Key: ${Buffer.alloc(16, 7).toString("base64")}`,
+        "Sec-WebSocket-Version: 13"
+      ];
+      if (token) {
+        headers.push(`Authorization: Bearer ${token}`);
+      }
+      socket.write(`${headers.join("\r\n")}\r\n\r\n`);
+    });
+    let response = "";
+    socket.on("data", chunk => {
+      response += chunk.toString("latin1");
+      const match = /^HTTP\/1\.1 (\d{3})/m.exec(response);
+      if (!match) {
+        return;
+      }
+      socket.destroy();
+      resolve(Number(match[1]));
+    });
+    socket.on("error", reject);
+  });
+}
+
+async function restartServer() {
+  resetBridgeStateForTests();
+  await closeServer(server);
+  server = startBridge({ port: 0, host: "127.0.0.1" });
+  await once(server, "listening");
 }
 
 async function pollUntil(client, predicate, timeoutMs = 3000) {

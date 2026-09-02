@@ -25,8 +25,9 @@ const readStateSignaturesBySelection = new Map();
 let latestDurableState = null;
 
 export function createBridgeServer() {
+  const authToken = (process.env.CODEX_WATCH_AUTH_TOKEN || "").trim();
   const server = http.createServer(async (request, response) => {
-    const requestURL = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const requestURL = new URL(request.url || "/", "http://localhost");
 
     if (requestURL.pathname === "/") {
       response.writeHead(200, { "content-type": "application/json" });
@@ -40,6 +41,10 @@ export function createBridgeServer() {
     }
 
     if (requestURL.pathname === "/codex-watch/message" && request.method === "POST") {
+      if (!isAuthorizedRequest(request, authToken)) {
+        unauthorizedJSONResponse(response);
+        return;
+      }
       try {
         const client = getHTTPClient(clientIDFromURL(requestURL), request.socket);
         const message = JSON.parse(await readRequestBody(request));
@@ -52,6 +57,10 @@ export function createBridgeServer() {
     }
 
     if (requestURL.pathname === "/codex-watch/poll" && request.method === "GET") {
+      if (!isAuthorizedRequest(request, authToken)) {
+        unauthorizedJSONResponse(response);
+        return;
+      }
       const client = getHTTPClient(clientIDFromURL(requestURL), request.socket);
       jsonResponse(response, 200, { ok: true, messages: drainQueuedMessages(client) });
       return;
@@ -62,8 +71,20 @@ export function createBridgeServer() {
   });
 
   server.on("upgrade", (request, socket) => {
-    if (request.url !== "/codex-watch") {
+    const requestURL = new URL(request.url || "/", "http://localhost");
+    if (requestURL.pathname !== "/codex-watch") {
       socket.destroy();
+      return;
+    }
+    if (!isAuthorizedRequest(request, authToken)) {
+      socket.end([
+        "HTTP/1.1 401 Unauthorized",
+        'WWW-Authenticate: Bearer realm="codex-watch"',
+        "Connection: close",
+        "Content-Length: 0",
+        "",
+        ""
+      ].join("\r\n"));
       return;
     }
 
@@ -2169,6 +2190,26 @@ function clientIDFromURL(requestURL) {
     return id;
   }
   return "watch-http-default";
+}
+
+function isAuthorizedRequest(request, expectedToken) {
+  if (!expectedToken) {
+    return true;
+  }
+  const header = request.headers.authorization;
+  const match = typeof header === "string" ? /^Bearer\s+(.+)$/i.exec(header) : null;
+  const candidate = match?.[1]?.trim() || "";
+  const expectedDigest = crypto.createHash("sha256").update(expectedToken).digest();
+  const candidateDigest = crypto.createHash("sha256").update(candidate).digest();
+  return crypto.timingSafeEqual(expectedDigest, candidateDigest);
+}
+
+function unauthorizedJSONResponse(response) {
+  response.writeHead(401, {
+    "content-type": "application/json",
+    "www-authenticate": 'Bearer realm="codex-watch"'
+  });
+  response.end(JSON.stringify({ ok: false, error: "Unauthorized" }));
 }
 
 function drainQueuedMessages(client) {

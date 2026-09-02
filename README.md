@@ -33,6 +33,7 @@ The first screen is intentionally just the pet. Tap for voice mode, long-press f
 
 - Codex pet sprites and animation states ported from `/Applications/Codex.app` and the Codex CLI pet renderer.
 - Mac bridge at `ws://<mac-lan-ip>:17842/codex-watch`.
+- Secure remote bridge support through `wss://` and an optional bearer token.
 - Watch microphone streaming as base64 `pcm-f32le`.
 - Transcription through the same Codex Desktop auth path by default, with optional direct OpenAI fallback.
 - Project/chat picker populated from `~/.codex/sessions`.
@@ -118,6 +119,14 @@ ws://127.0.0.1:17842/codex-watch
 
 Set `CODEX_WATCH_OPEN_CODEX=1` if you want the bridge to open `/Applications/Codex.app` when the watch connects.
 
+Set `CODEX_WATCH_AUTH_TOKEN` to require the same bearer token from the watch for WebSocket and HTTP fallback requests:
+
+```sh
+CODEX_WATCH_AUTH_TOKEN='<long-random-token>' ./scripts/install.sh --bridge-only
+```
+
+Leave the variable unset for the original unauthenticated local-LAN behavior.
+
 To start the bridge manually in `tmux` without the installer:
 
 ```sh
@@ -127,12 +136,55 @@ tmux new-session -d -s codex-watch-bridge "cd \"$PWD\" && exec env CODEX_WATCH_S
 tail -f build/codex-watch-bridge.log
 ```
 
+## Secure Remote Access
+
+Keep the bridge and Codex app-server on the Mac that owns `~/.codex/sessions`. Publish the local bridge through a TLS reverse proxy or tunnel, and keep port `17842` private to the Mac and trusted LAN.
+
+Generate and save a token:
+
+```sh
+openssl rand -hex 32
+```
+
+Start the bridge with that token:
+
+```sh
+CODEX_WATCH_AUTH_TOKEN='<saved-token>' \
+  CODEX_WATCH_SHOW_NETWORK_HINTS=1 \
+  ./scripts/install.sh --bridge-only
+```
+
+The installer carries `CODEX_WATCH_AUTH_TOKEN` into its detached tmux supervisor. Restart the bridge with the same token after changing its environment.
+
+For a named Cloudflare Tunnel, route one hostname to the local bridge:
+
+```yaml
+tunnel: <TUNNEL_UUID>
+credentials-file: /Users/<mac-user>/.cloudflared/<TUNNEL_UUID>.json
+
+ingress:
+  - hostname: watch.example.com
+    service: http://127.0.0.1:17842
+  - service: http_status:404
+```
+
+Run `cloudflared` as a persistent macOS service after the named tunnel and DNS route are created. The public Watch URL is then:
+
+```text
+wss://watch.example.com/codex-watch
+```
+
+On the watch, long-press the pet, open `Bridge Settings`, enter the public `wss://` URL and the saved token, then tap `Connect`. The app stores the token in the watchOS Keychain. The same public URL works on local Wi-Fi and remote cellular/Wi-Fi networks. `wss://` uses system certificate validation, so use a publicly trusted certificate whose hostname matches the configured URL.
+
+The bridge keeps `GET /` available as a minimal health check. WebSocket upgrades and the `/codex-watch/message` and `/codex-watch/poll` command endpoints require the bearer token whenever `CODEX_WATCH_AUTH_TOKEN` is set.
+
 ## Watch Controls
 
 - Tap pet: start voice mode.
 - Tap waveform: stop recording and transcribe.
 - Send: sends the transcript into the selected Codex chat.
 - Long-press pet: open project/chat picker.
+- Bridge Settings in the picker: set the local or remote bridge URL and bearer token.
 - New Chat: start a fresh Codex thread for the selected project.
 - Digital Crown: move through the current project/chat target.
 - Double Tap: open visible text if present, otherwise start voice mode.

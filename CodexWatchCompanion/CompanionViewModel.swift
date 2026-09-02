@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import WatchKit
 
 protocol WatchHapticPlaying: AnyObject {
@@ -8,6 +9,57 @@ protocol WatchHapticPlaying: AnyObject {
 final class WatchHaptics: WatchHapticPlaying {
     func play(_ type: WKHapticType) {
         WKInterfaceDevice.current().play(type)
+    }
+}
+
+enum BridgeTokenKeychain {
+    private static let service = Bundle.main.bundleIdentifier ?? "dev.codexwatchcompanion"
+    private static let account = "bridge-auth-token"
+
+    static func load() -> String? {
+        var query = baseQuery
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func save(_ token: String) {
+        if token.isEmpty {
+            SecItemDelete(baseQuery as CFDictionary)
+            return
+        }
+
+        let data = Data(token.utf8)
+        let updateStatus = SecItemUpdate(
+            baseQuery as CFDictionary,
+            [kSecValueData: data] as CFDictionary
+        )
+        if updateStatus == errSecSuccess {
+            return
+        }
+        guard updateStatus == errSecItemNotFound else {
+            print("CodexWatch keychain update failed \(updateStatus)")
+            return
+        }
+
+        var item = baseQuery
+        item[kSecValueData] = data
+        item[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        if addStatus != errSecSuccess {
+            print("CodexWatch keychain add failed \(addStatus)")
+        }
+    }
+
+    private static var baseQuery: [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: account
+        ]
     }
 }
 
@@ -59,6 +111,11 @@ final class CompanionViewModel: ObservableObject {
             defaults.set(serverURLString, forKey: "serverURLString")
         }
     }
+    @Published var bridgeToken: String {
+        didSet {
+            saveBridgeToken(bridgeToken)
+        }
+    }
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var selectedPet: CodexPet
     @Published private(set) var visualState: PetVisualState = .idle
@@ -76,7 +133,6 @@ final class CompanionViewModel: ObservableObject {
     @Published private(set) var pickerItems: [CodexPickerItem] = []
     @Published var transcriptReview: VoiceTranscript?
     @Published var messageReader: ReadableMessage?
-    @Published var showingSettings = false
     @Published var showingPicker = false
     @Published var showingOnboarding = false
 
@@ -189,13 +245,13 @@ final class CompanionViewModel: ObservableObject {
     private let runtimeKeeper: WatchRuntimeKeeping
     private let haptics: WatchHapticPlaying
     private let defaults: UserDefaults
+    private let saveBridgeToken: (String) -> Void
     private var isRecordRequestPending = false
     private var recordingRequested = false
     private var feedbackTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var lastHapticSignature: String?
     private var reconnectAttempt = 0
-    private var serverURLCandidateIndex = 0
     private var shouldReconnect = true
     private static let persistedVisibleTaskKey = "persistedVisibleTask"
     private static let readVisibleTaskSignatureKey = "readVisibleTaskSignature"
@@ -225,23 +281,6 @@ final class CompanionViewModel: ObservableObject {
     }
 
     private static let preferredServerURLString = "ws://codex-watch.local:17842/codex-watch"
-    private static let fallbackServerURLStrings = [
-        "ws://codex-watch.local:17842/codex-watch",
-        "ws://your-mac.local:17842/codex-watch"
-    ]
-
-    private var serverURLCandidates: [String] {
-        var candidates = [serverURLString].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        for candidate in Self.fallbackServerURLStrings where !candidates.contains(candidate) {
-            candidates.append(candidate)
-        }
-        return candidates
-    }
-
-    private var activeServerURLString: String {
-        let candidates = serverURLCandidates
-        return candidates[serverURLCandidateIndex % candidates.count]
-    }
 
     private var capabilities: [String] {
         [
@@ -259,17 +298,22 @@ final class CompanionViewModel: ObservableObject {
         audio: WatchAudioStreaming = WatchAudioStreamer(),
         runtimeKeeper: WatchRuntimeKeeping = WatchRuntimeKeeper(),
         haptics: WatchHapticPlaying = WatchHaptics(),
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        bridgeTokenLoader: () -> String? = BridgeTokenKeychain.load,
+        bridgeTokenSaver: @escaping (String) -> Void = BridgeTokenKeychain.save
     ) {
         self.socket = socket
         self.audio = audio
         self.runtimeKeeper = runtimeKeeper
         self.haptics = haptics
         self.defaults = defaults
+        self.saveBridgeToken = bridgeTokenSaver
 
         let environmentURL = ProcessInfo.processInfo.environment["CODEX_WATCH_SERVER_URL"]
         let savedURL = defaults.string(forKey: "serverURLString")
         self.serverURLString = environmentURL ?? savedURL ?? Self.preferredServerURLString
+        let environmentToken = ProcessInfo.processInfo.environment["CODEX_WATCH_AUTH_TOKEN"]
+        self.bridgeToken = environmentToken ?? bridgeTokenLoader() ?? ""
 
         let petID = defaults.string(forKey: "selectedPetID")
         self.selectedPet = CodexPet.pet(id: petID)
@@ -312,8 +356,10 @@ final class CompanionViewModel: ObservableObject {
         reconnectTask?.cancel()
         reconnectTask = nil
 
-        let candidate = activeServerURLString
-        guard let url = URL(string: candidate), url.scheme?.hasPrefix("ws") == true else {
+        let candidate = serverURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let url = URL(string: candidate)
+        let scheme = url?.scheme?.lowercased()
+        guard let url, url.host != nil, scheme == "ws" || scheme == "wss" else {
             shouldReconnect = false
             statusTitle = "Invalid URL"
             statusBody = candidate
@@ -325,7 +371,11 @@ final class CompanionViewModel: ObservableObject {
             statusBody = "Linking"
             visualState = .waiting
         }
-        socket.connect(to: url, hello: envelope(type: "hello", state: visualState, items: pickerItems))
+        socket.connect(
+            to: url,
+            token: bridgeToken,
+            hello: envelope(type: "hello", state: visualState, items: pickerItems)
+        )
     }
 
     func disconnect() {
@@ -345,7 +395,6 @@ final class CompanionViewModel: ObservableObject {
 
         switch state {
         case .connected:
-            promoteActiveServerURL()
             resetReconnect()
             if !isVoiceModeActive && !hasPersistentVisibleTask {
                 statusTitle = selectedPet.displayName
@@ -363,7 +412,6 @@ final class CompanionViewModel: ObservableObject {
                 cancelRecordingAfterConnectionLoss()
             }
             if shouldReconnect {
-                advanceServerCandidate()
                 if !hasPersistentVisibleTask {
                     statusTitle = "Bridge error"
                     statusBody = "Reconnecting"
@@ -403,20 +451,6 @@ final class CompanionViewModel: ObservableObject {
         reconnectAttempt = 0
         reconnectTask?.cancel()
         reconnectTask = nil
-    }
-
-    private func advanceServerCandidate() {
-        let candidates = serverURLCandidates
-        guard candidates.count > 1 else { return }
-        serverURLCandidateIndex = (serverURLCandidateIndex + 1) % candidates.count
-    }
-
-    private func promoteActiveServerURL() {
-        let activeURLString = activeServerURLString
-        if serverURLString != activeURLString {
-            serverURLString = activeURLString
-        }
-        serverURLCandidateIndex = 0
     }
 
     private func reconnectDelayNanoseconds() -> UInt64 {
