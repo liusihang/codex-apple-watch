@@ -109,16 +109,16 @@ final class CodexWatchCompanionUITests: XCTestCase {
 
         XCTAssertTrue(app.buttons["picker-new-chat-button"].waitForExistence(timeout: 5))
 
-        for _ in 0..<6 where !codexMascot.exists {
-            app.swipeUp()
+        for _ in 0..<20 where !codexMascot.exists {
+            scrollPickerUp(in: app)
         }
 
         XCTAssertTrue(codexMascot.waitForExistence(timeout: 5))
     }
 
-    func testBridgeSettingsAreReachableFromPicker() {
-        let app = launchApp(scenario: "picker")
-        let settings = app.buttons["bridge-settings-link"]
+    func testBridgeSettingsAreReachableFromOnboarding() {
+        let app = launchApp(scenario: "onboarding")
+        let settings = app.buttons["onboarding-bridge-settings-link"]
 
         XCTAssertTrue(settings.waitForExistence(timeout: 5))
         settings.tap()
@@ -132,8 +132,8 @@ final class CodexWatchCompanionUITests: XCTestCase {
         let app = launchApp(scenario: "picker-many")
 
         XCTAssertTrue(app.buttons["picker-new-chat-button"].waitForExistence(timeout: 5))
-        for _ in 0..<5 where !app.buttons["view-all-projects"].exists {
-            app.swipeUp()
+        for _ in 0..<20 where !app.buttons["view-all-projects"].exists {
+            scrollPickerUp(in: app)
         }
         XCTAssertTrue(app.buttons["view-all-projects"].waitForExistence(timeout: 5))
 
@@ -157,5 +157,11 @@ final class CodexWatchCompanionUITests: XCTestCase {
         app.launchEnvironment["CODEX_WATCH_UI_TEST_SCENARIO"] = scenario
         app.launch()
         return app
+    }
+
+    private func scrollPickerUp(in app: XCUIApplication) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.78))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.52))
+        start.press(forDuration: 0.05, thenDragTo: end)
     }
 }
