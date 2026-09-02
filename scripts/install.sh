@@ -18,8 +18,15 @@ START_BRIDGE=1
 RUN_TESTS=0
 BUNDLE_BUILD_SETTING=("PRODUCT_BUNDLE_IDENTIFIER=$BUNDLE_ID")
 DEVICE_BUILD_SETTINGS=("${BUNDLE_BUILD_SETTING[@]}")
+DEVICE_LAUNCH_ENV=()
 if [[ -n "$DEVELOPMENT_TEAM" ]]; then
   DEVICE_BUILD_SETTINGS+=("DEVELOPMENT_TEAM=$DEVELOPMENT_TEAM")
+fi
+if [[ -n "${CODEX_WATCH_SERVER_URL:-}" ]]; then
+  DEVICE_LAUNCH_ENV+=("DEVICECTL_CHILD_CODEX_WATCH_SERVER_URL=$CODEX_WATCH_SERVER_URL")
+fi
+if [[ -n "${CODEX_WATCH_AUTH_TOKEN:-}" ]]; then
+  DEVICE_LAUNCH_ENV+=("DEVICECTL_CHILD_CODEX_WATCH_AUTH_TOKEN=$CODEX_WATCH_AUTH_TOKEN")
 fi
 BRIDGE_ENV_NAMES=(
   CODEX_WATCH_AUTH_TOKEN
@@ -56,6 +63,7 @@ Environment:
   CODEX_WATCH_SIMULATOR_NAME    watchOS simulator name. Default: Apple Watch Series 11 (46mm).
   CODEX_WATCH_BUNDLE_ID         Bundle identifier to build, install, and launch. Default: dev.codexwatchcompanion.
   CODEX_WATCH_DEVELOPMENT_TEAM  Apple development team identifier for device signing.
+  CODEX_WATCH_SERVER_URL        Provision this bridge URL when launching the installed Watch app.
   CODEX_WATCH_SHOW_NETWORK_HINTS=1
                                 Print LAN/hostname bridge URLs in the bridge log.
   CODEX_WATCH_OPEN_CODEX=1      Open /Applications/Codex.app when the watch connects.
@@ -188,7 +196,7 @@ install_device() {
     --timeout 180 \
     "$WATCH_APP"
 
-  xcrun devicectl device process launch \
+  env "${DEVICE_LAUNCH_ENV[@]}" xcrun devicectl device process launch \
     --device "$DEVICE_ID" \
     --timeout 60 \
     "$BUNDLE_ID"

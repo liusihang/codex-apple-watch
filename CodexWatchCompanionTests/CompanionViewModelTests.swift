@@ -390,6 +390,20 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertEqual(restored.bridgeToken, "saved-secret")
     }
 
+    func testEnvironmentBridgeConfigurationPersistsAcrossModelRecreation() {
+        let configured = makeModel(environment: [
+            "CODEX_WATCH_SERVER_URL": "wss://watch.example.com/codex-watch",
+            "CODEX_WATCH_AUTH_TOKEN": "injected-secret"
+        ])
+
+        XCTAssertEqual(configured.serverURLString, "wss://watch.example.com/codex-watch")
+        XCTAssertEqual(configured.bridgeToken, "injected-secret")
+
+        let restored = makeModel()
+        XCTAssertEqual(restored.serverURLString, "wss://watch.example.com/codex-watch")
+        XCTAssertEqual(restored.bridgeToken, "injected-secret")
+    }
+
     func testConnectPassesConfiguredURLAndTokenToSocket() {
         let model = makeModel()
         model.serverURLString = "wss://watch.example.com/codex-watch"
@@ -440,7 +454,7 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertNil(BridgeAuthorization(token: "bad\r\ntoken"))
     }
 
-    private func makeModel() -> CompanionViewModel {
+    private func makeModel(environment: [String: String] = [:]) -> CompanionViewModel {
         CompanionViewModel(
             socket: socket,
             audio: audio,
@@ -448,7 +462,8 @@ final class CompanionViewModelTests: XCTestCase {
             haptics: haptics,
             defaults: defaults,
             bridgeTokenLoader: { [weak self] in self?.storedBridgeToken },
-            bridgeTokenSaver: { [weak self] token in self?.storedBridgeToken = token }
+            bridgeTokenSaver: { [weak self] token in self?.storedBridgeToken = token },
+            environment: environment
         )
     }
 }

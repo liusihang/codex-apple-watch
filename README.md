@@ -75,8 +75,12 @@ For a free Personal Team, pass a unique bundle identifier and the team ID shown 
 ```sh
 CODEX_WATCH_BUNDLE_ID=com.example.codexwatch \
 CODEX_WATCH_DEVELOPMENT_TEAM=<PERSONAL_TEAM_ID> \
+CODEX_WATCH_SERVER_URL=wss://watch.example.com/codex-watch \
+CODEX_WATCH_AUTH_TOKEN='<saved-token>' \
 ./scripts/install.sh --device <APPLE_WATCH_DEVICE_ID>
 ```
+
+The installer passes the URL and token to the newly launched Watch app once. The app persists the URL in UserDefaults and the token in the watchOS Keychain, so long tokens do not need to be entered on the Watch.
 
 The bridge log is written to:
 

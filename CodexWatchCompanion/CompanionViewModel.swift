@@ -300,7 +300,8 @@ final class CompanionViewModel: ObservableObject {
         haptics: WatchHapticPlaying = WatchHaptics(),
         defaults: UserDefaults = .standard,
         bridgeTokenLoader: () -> String? = BridgeTokenKeychain.load,
-        bridgeTokenSaver: @escaping (String) -> Void = BridgeTokenKeychain.save
+        bridgeTokenSaver: @escaping (String) -> Void = BridgeTokenKeychain.save,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.socket = socket
         self.audio = audio
@@ -309,11 +310,17 @@ final class CompanionViewModel: ObservableObject {
         self.defaults = defaults
         self.saveBridgeToken = bridgeTokenSaver
 
-        let environmentURL = ProcessInfo.processInfo.environment["CODEX_WATCH_SERVER_URL"]
+        let environmentURL = environment["CODEX_WATCH_SERVER_URL"]
         let savedURL = defaults.string(forKey: "serverURLString")
         self.serverURLString = environmentURL ?? savedURL ?? Self.preferredServerURLString
-        let environmentToken = ProcessInfo.processInfo.environment["CODEX_WATCH_AUTH_TOKEN"]
+        let environmentToken = environment["CODEX_WATCH_AUTH_TOKEN"]
         self.bridgeToken = environmentToken ?? bridgeTokenLoader() ?? ""
+        if let environmentURL {
+            defaults.set(environmentURL, forKey: "serverURLString")
+        }
+        if let environmentToken {
+            bridgeTokenSaver(environmentToken)
+        }
 
         let petID = defaults.string(forKey: "selectedPetID")
         self.selectedPet = CodexPet.pet(id: petID)
