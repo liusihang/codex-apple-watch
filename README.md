@@ -31,18 +31,18 @@ The first screen shows the pet plus the currently selected chat. Tap the pet for
 
 ## What Works
 
-- Codex pet sprites and animation states ported from `/Applications/Codex.app` and the Codex CLI pet renderer.
+- Built-in Codex pet sprites plus authenticated runtime sync of third-party v1/v2 pets installed under `~/.codex/pets`.
 - Mac bridge at `ws://<mac-lan-ip>:17842/codex-watch`.
 - Secure remote bridge support through `wss://` and an optional bearer token.
 - Watch microphone streaming as base64 `pcm-f32le`.
 - Transcription through the same Codex Desktop auth path by default, with optional direct OpenAI fallback.
-- Project/chat picker populated from `~/.codex/sessions`.
+- Project/chat picker populated from the 10 most recently interacted main conversations under `~/.codex/sessions`; subagent sessions are excluded.
 - First-run onboarding for choosing a pet and selecting a project/chat.
 - New chat creation from the switcher or a project chat list.
 - Project/chat sections capped to six rows with `View all` controls for larger histories.
 - Voice transcript review and send flow.
 - Streaming reply previews from Codex app-server turn events.
-- Scrollable conversation history with the most recent 20 user/assistant messages.
+- Scrollable conversation history with the most recent five user/assistant messages.
 - Markdown rendering in full message view, including inline code/link attributes.
 - Haptics for send, reply, transcript, and failure states.
 - Durable unread/thinking state across watch app restarts and bridge reconnects, plus app-open state refresh for the selected chat.
@@ -200,7 +200,7 @@ The bridge keeps `GET /` available as a minimal health check. WebSocket upgrades
 - Bridge Settings in the picker: set the local or remote bridge URL and bearer token.
 - New Chat: start a fresh Codex thread for the selected project.
 - Digital Crown: cycle through real Codex chats; the current chat title is shown below the pet.
-- Current chat preview or a chat row: open the most recent 20 user/assistant messages.
+- Current chat preview or a chat row: open the most recent five user/assistant messages.
 - Double Tap: open visible text if present, otherwise start voice mode.
 - Reply button in message view: scroll to the bottom of the message and tap `Reply`.
 
@@ -216,7 +216,9 @@ The bridge sends these watch-visible states:
 
 Unread replies and thinking/running task cards are persisted locally on the watch. The bridge also replays the last durable task state when the watch reconnects, and on app open asks Codex app-server for the selected chat state so completed replies or active work are restored when possible. Opening a message marks it read and clears the replay state for the current project/chat.
 
-Chat selection and chat opening are separate protocol actions. `chat-selected` updates the current target while Crown scrolling; `chat-opened` requests conversation content. The bridge reads persisted session JSONL first, supports current and legacy message records, and uses paginated app-server history when a local session is unavailable. Pet and chat selections remain isolated per connected Watch client.
+Chat selection and chat opening are separate protocol actions. `chat-selected` updates the current target while Crown scrolling; `chat-opened` requests conversation content. The bridge excludes subagent sessions, keeps the 10 most recently interacted main conversations, reads persisted session JSONL first, and uses paginated app-server history when a local session is unavailable. Conversation responses contain the latest five user/assistant messages. Pet and chat selections remain isolated per connected Watch client.
+
+On each Watch connection and picker refresh, the bridge reads third-party pet manifests from `~/.codex/pets`. It sends the pet metadata to the Watch and exposes each PNG/WebP spritesheet through a bearer-authenticated asset endpoint. The Watch downloads and renders v1 8×9 and v2 8×11 spritesheets dynamically, so newly installed Mac pets require only a Watch reconnect rather than a source-code change.
 
 ## Development
 

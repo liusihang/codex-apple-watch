@@ -113,6 +113,7 @@ struct BridgeMessage: Codable {
     var projectIndex: Int?
     var chatIndex: Int?
     var items: [CodexPickerItem]?
+    var pets: [CodexPet]?
     var newChat: Bool?
     var entries: [ConversationEntry]?
     var hasMore: Bool?
@@ -140,6 +141,7 @@ struct BridgeMessage: Codable {
         projectIndex: Int? = nil,
         chatIndex: Int? = nil,
         items: [CodexPickerItem]? = nil,
+        pets: [CodexPet]? = nil,
         newChat: Bool? = nil,
         entries: [ConversationEntry]? = nil,
         hasMore: Bool? = nil
@@ -166,6 +168,7 @@ struct BridgeMessage: Codable {
         self.projectIndex = projectIndex
         self.chatIndex = chatIndex
         self.items = items
+        self.pets = pets
         self.newChat = newChat
         self.entries = entries
         self.hasMore = hasMore

@@ -2,6 +2,20 @@ import Foundation
 import Security
 import WatchKit
 
+typealias PetSpriteLoader = (URL, String) async throws -> Data
+
+private func loadPetSprite(from url: URL, token: String) async throws -> Data {
+    var request = URLRequest(url: url)
+    if !token.isEmpty {
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    let (data, response) = try await URLSession.shared.data(for: request)
+    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+        throw URLError(.badServerResponse)
+    }
+    return data
+}
+
 protocol WatchHapticPlaying: AnyObject {
     func play(_ type: WKHapticType)
 }
@@ -126,6 +140,8 @@ final class CompanionViewModel: ObservableObject {
     }
     @Published private(set) var connectionState: ConnectionState = .disconnected
     @Published private(set) var selectedPet: CodexPet
+    @Published private(set) var availablePets: [CodexPet] = CodexPet.builtIns
+    @Published private(set) var remotePetSprites: [String: Data] = [:]
     @Published private(set) var visualState: PetVisualState = .idle
     @Published private(set) var feedbackVisualState: PetVisualState?
     @Published private(set) var hasUnreadMessage = false
@@ -268,6 +284,7 @@ final class CompanionViewModel: ObservableObject {
     private let haptics: WatchHapticPlaying
     private let defaults: UserDefaults
     private let saveBridgeToken: (String) -> Void
+    private let petSpriteLoader: PetSpriteLoader
     private var isRecordRequestPending = false
     private var recordingRequested = false
     private var feedbackTask: Task<Void, Never>?
@@ -275,6 +292,8 @@ final class CompanionViewModel: ObservableObject {
     private var lastHapticSignature: String?
     private var reconnectAttempt = 0
     private var shouldReconnect = true
+    private var petSpriteDownloads = Set<String>()
+    private var petSpriteRevisions: [String: String] = [:]
     private static let persistedVisibleTaskKey = "persistedVisibleTask"
     private static let readVisibleTaskSignatureKey = "readVisibleTaskSignature"
     private static let didCompleteOnboardingKey = "didCompleteOnboarding"
@@ -307,6 +326,7 @@ final class CompanionViewModel: ObservableObject {
     private var capabilities: [String] {
         [
             "codex-pets",
+            "remote-pets-v2",
             "mic-stream-pcm-f32le",
             "tap-to-talk",
             "digital-crown-project-chat",
@@ -323,6 +343,7 @@ final class CompanionViewModel: ObservableObject {
         defaults: UserDefaults = .standard,
         bridgeTokenLoader: () -> String? = BridgeTokenKeychain.load,
         bridgeTokenSaver: @escaping (String) -> Void = BridgeTokenKeychain.save,
+        petSpriteLoader: @escaping PetSpriteLoader = loadPetSprite,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.socket = socket
@@ -331,6 +352,7 @@ final class CompanionViewModel: ObservableObject {
         self.haptics = haptics
         self.defaults = defaults
         self.saveBridgeToken = bridgeTokenSaver
+        self.petSpriteLoader = petSpriteLoader
 
         let environmentURL = environment["CODEX_WATCH_SERVER_URL"]
         let savedURL = defaults.string(forKey: "serverURLString")
@@ -505,11 +527,11 @@ final class CompanionViewModel: ObservableObject {
     }
 
     func cyclePet() {
-        guard let index = CodexPet.builtIns.firstIndex(of: selectedPet) else {
-            selectPet(CodexPet.builtIns[0])
+        guard let index = availablePets.firstIndex(of: selectedPet) else {
+            selectPet(availablePets[0])
             return
         }
-        selectPet(CodexPet.builtIns[(index + 1) % CodexPet.builtIns.count])
+        selectPet(availablePets[(index + 1) % availablePets.count])
     }
 
     func selectPet(_ pet: CodexPet) {
@@ -517,6 +539,10 @@ final class CompanionViewModel: ObservableObject {
         defaults.set(selectedPet.id, forKey: "selectedPetID")
         statusTitle = selectedPet.displayName
         socket.send(envelope(type: "pet-selected", state: visualState))
+    }
+
+    func spriteData(for pet: CodexPet) -> Data? {
+        remotePetSprites[pet.id]
     }
 
     func showPicker() {
@@ -1011,6 +1037,9 @@ final class CompanionViewModel: ObservableObject {
     private func handle(_ message: BridgeMessage) {
         switch message.type {
         case "state":
+            if let pets = message.pets {
+                updatePets(pets)
+            }
             if let items = message.items {
                 updatePickerItems(items)
             }
@@ -1049,6 +1078,9 @@ final class CompanionViewModel: ObservableObject {
         case "pong":
             statusBody = "Linked"
         case "picker-items":
+            if let pets = message.pets {
+                updatePets(pets)
+            }
             updatePickerItems(message.items ?? [])
         case "transcript":
             let text = message.text ?? message.body ?? ""
@@ -1076,6 +1108,60 @@ final class CompanionViewModel: ObservableObject {
         default:
             statusBody = message.text ?? message.body ?? statusBody
         }
+    }
+
+    private func updatePets(_ remotePets: [CodexPet]) {
+        let validRemotePets = remotePets.filter {
+            !$0.id.isEmpty && $0.spritePath?.hasPrefix("/codex-watch/pets/") == true
+        }
+        let remoteIDs = Set(validRemotePets.map(\.id))
+        availablePets = validRemotePets + CodexPet.builtIns.filter { !remoteIDs.contains($0.id) }
+
+        let selectedID = defaults.string(forKey: "selectedPetID") ?? selectedPet.id
+        selectedPet = CodexPet.pet(id: selectedID, in: availablePets)
+
+        remotePetSprites = remotePetSprites.filter { remoteIDs.contains($0.key) }
+        petSpriteRevisions = petSpriteRevisions.filter { remoteIDs.contains($0.key) }
+        for pet in validRemotePets {
+            downloadSpriteIfNeeded(for: pet)
+        }
+    }
+
+    private func downloadSpriteIfNeeded(for pet: CodexPet) {
+        let revision = pet.spriteRevision ?? ""
+        guard petSpriteRevisions[pet.id] != revision, !petSpriteDownloads.contains(pet.id) else { return }
+        guard let url = petSpriteURL(for: pet) else { return }
+
+        petSpriteDownloads.insert(pet.id)
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.petSpriteDownloads.remove(pet.id) }
+            do {
+                let data = try await self.petSpriteLoader(url, self.bridgeToken)
+                guard !data.isEmpty else { return }
+                self.remotePetSprites[pet.id] = data
+                self.petSpriteRevisions[pet.id] = revision
+            } catch {
+                print("CodexWatch pet download failed \(pet.id): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func petSpriteURL(for pet: CodexPet) -> URL? {
+        guard let spritePath = pet.spritePath, var components = URLComponents(string: serverURLString) else {
+            return nil
+        }
+        switch components.scheme?.lowercased() {
+        case "ws":
+            components.scheme = "http"
+        case "wss":
+            components.scheme = "https"
+        default:
+            return nil
+        }
+        components.path = spritePath
+        components.queryItems = pet.spriteRevision.map { [URLQueryItem(name: "v", value: $0)] }
+        return components.url
     }
 
     private func envelope(

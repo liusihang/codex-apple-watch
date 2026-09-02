@@ -51,6 +51,7 @@ private struct CompanionWatchContent: View {
                         VStack(spacing: 5) {
                             PetControlButton(
                                 pet: model.selectedPet,
+                                spriteData: model.spriteData(for: model.selectedPet),
                                 state: model.petDisplayState,
                                 size: petSize(in: proxy.size),
                                 label: model.primaryShortcutLabel,
@@ -179,6 +180,7 @@ private struct ActiveTaskPetView: View {
         VStack(alignment: .center, spacing: 7) {
             PetControlButton(
                 pet: model.selectedPet,
+                spriteData: model.spriteData(for: model.selectedPet),
                 state: model.petDisplayState,
                 size: CGSize(width: petWidth, height: petWidth / codexPetFrameAspect),
                 label: "Start voice",
@@ -211,6 +213,7 @@ private struct ActiveTaskPetView: View {
 
 private struct PetControlButton: View {
     let pet: CodexPet
+    let spriteData: Data?
     let state: PetVisualState
     let size: CGSize
     let label: String
@@ -230,7 +233,7 @@ private struct PetControlButton: View {
             }
             action()
         } label: {
-            CodexPetSpriteView(pet: pet, state: state)
+            CodexPetSpriteView(pet: pet, state: state, spriteData: spriteData)
                 .frame(width: size.width, height: size.height)
                 .contentShape(Rectangle())
         }
@@ -374,14 +377,15 @@ private struct ProjectChatPickerView: View {
                 }
 
                 Section("Mascot") {
-                    ForEach(CodexPet.builtIns) { pet in
+                    ForEach(model.availablePets) { pet in
                         Button {
                             model.selectPet(pet)
                             dismiss()
                         } label: {
                             MascotPickerRow(
                                 pet: pet,
-                                isSelected: pet == model.selectedPet
+                                isSelected: pet == model.selectedPet,
+                                spriteData: model.spriteData(for: pet)
                             )
                         }
                         .buttonStyle(.plain)
@@ -477,13 +481,14 @@ private struct OnboardingView: View {
                 }
 
                 Section("Mascot") {
-                    ForEach(CodexPet.builtIns) { pet in
+                    ForEach(model.availablePets) { pet in
                         Button {
                             model.selectPet(pet)
                         } label: {
                             MascotPickerRow(
                                 pet: pet,
-                                isSelected: pet == model.selectedPet
+                                isSelected: pet == model.selectedPet,
+                                spriteData: model.spriteData(for: pet)
                             )
                         }
                         .buttonStyle(.plain)
@@ -615,10 +620,11 @@ private struct ViewAllButton: View {
 private struct MascotPickerRow: View {
     let pet: CodexPet
     let isSelected: Bool
+    let spriteData: Data?
 
     var body: some View {
         HStack(spacing: 8) {
-            CodexPetSpriteView(pet: pet, state: .idle, isAnimationEnabled: false)
+            CodexPetSpriteView(pet: pet, state: .idle, isAnimationEnabled: false, spriteData: spriteData)
                 .frame(width: 26, height: 28)
 
             VStack(alignment: .leading, spacing: 2) {

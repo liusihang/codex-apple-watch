@@ -20,7 +20,9 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
       cwd: path.join(tempDir, "project-one"),
       prompt: "Initial fixture prompt"
     });
+    await writePetFixture(path.join(tempDir, "pets"), "cody");
     process.env.CODEX_SESSIONS_DIR = tempDir;
+    process.env.CODEX_WATCH_PETS_DIR = path.join(tempDir, "pets");
     process.env.CODEX_WATCH_MOCK_APP_SERVER = "1";
     process.env.CODEX_WATCH_MOCK_REPLY = "Mock **reply** with `inlineCode`.";
     delete process.env.CODEX_WATCH_AUTH_TOKEN;
@@ -52,6 +54,66 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(response.messages.at(-1)?.body, "Bridge ready");
     assert.ok(response.messages.at(-1)?.items.some(item => item.chat === "thread-e2e-1"));
     assert.ok(response.messages.at(-1)?.items.some(item => item.kind === "project"));
+    assert.deepEqual(response.messages.at(-1)?.pets, [{
+      id: "cody",
+      displayName: "Cody",
+      description: "Fixture pet",
+      spriteVersionNumber: 2,
+      spritePath: "/codex-watch/pets/cody/spritesheet",
+      spriteRevision: response.messages.at(-1)?.pets?.[0]?.spriteRevision
+    }]);
+  });
+
+  test("serves installed pet sprites through the bridge", async () => {
+    const response = await requestPet("cody");
+    assert.equal(response.status, 200);
+    assert.equal(response.contentType, "image/webp");
+    assert.equal(response.body.toString(), "fixture-webp");
+  });
+
+  test("picker returns only the 10 most recent main conversations", async () => {
+    const baseTime = Date.now() + 60_000;
+    for (let index = 0; index < 12; index += 1) {
+      await writeSessionFixture(tempDir, {
+        threadId: `main-${index}`,
+        cwd: path.join(tempDir, `project-${index % 3}`),
+        prompt: `Main conversation ${index}`,
+        mtimeMs: baseTime + index
+      });
+    }
+    await writeSessionFixture(tempDir, {
+      threadId: "main-11",
+      fileID: "duplicate-main-11",
+      cwd: path.join(tempDir, "project-2"),
+      prompt: "Newer file for the same main conversation",
+      mtimeMs: baseTime + 200
+    });
+    for (let index = 0; index < 3; index += 1) {
+      await writeSessionFixture(tempDir, {
+        threadId: `subagent-${index}`,
+        cwd: path.join(tempDir, "project-subagent"),
+        prompt: `Subagent conversation ${index}`,
+        mtimeMs: baseTime + 100 + index,
+        meta: {
+          parent_thread_id: "main-11",
+          agent_role: "explorer",
+          source: { subagent: { thread_spawn: { parent_thread_id: "main-11" } } }
+        }
+      });
+    }
+
+    const response = await postMessage("main-chat-client", {
+      type: "hello",
+      pet: "codex",
+      capabilities: ["project-chat-picker"]
+    });
+    const chats = response.messages.at(-1)?.items.filter(item => item.kind === "chat") ?? [];
+    assert.equal(chats.length, 10);
+    assert.deepEqual(chats.map(item => item.chat), [
+      "main-11", "main-10", "main-9", "main-8", "main-7",
+      "main-6", "main-5", "main-4", "main-3", "main-2"
+    ]);
+    assert.equal(chats.some(item => item.chat.startsWith("subagent-")), false);
   });
 
   test("hello resolves placeholder selection to the real Codex chat", async () => {
@@ -176,7 +238,7 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(conversation?.hasMore, false);
   });
 
-  test("chat-opened falls back to session JSONL and limits the response to 20 messages", async () => {
+  test("chat-opened falls back to session JSONL and limits the response to 5 messages", async () => {
     process.env.CODEX_WATCH_MOCK_RESUME_ERROR = "1";
     const fixtureFile = sessionFixturePath(tempDir, "thread-e2e-1");
     const events = [];
@@ -226,8 +288,8 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
       });
     const conversation = messages.findLast(message => message.type === "conversation");
 
-    assert.equal(conversation?.entries.length, 20);
-    assert.equal(conversation?.entries[0]?.text, "Question 2");
+    assert.equal(conversation?.entries.length, 5);
+    assert.equal(conversation?.entries[0]?.text, "Answer 9");
     assert.equal(conversation?.entries.at(-1)?.text, "Answer 11");
     assert.equal(conversation?.hasMore, true);
   });
@@ -264,7 +326,7 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     assert.equal(conversation?.hasMore, false);
   });
 
-  test("chat-opened follows app-server item pagination to fill the latest 20 messages", async () => {
+  test("chat-opened follows app-server item pagination to fill the latest 5 messages", async () => {
     const descendingItems = [];
     for (let index = 11; index >= 1; index -= 1) {
       descendingItems.push({
@@ -323,8 +385,8 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     });
     const conversation = messages.findLast(message => message.type === "conversation");
 
-    assert.equal(conversation?.entries.length, 20);
-    assert.equal(conversation?.entries[0]?.text, "Question 2");
+    assert.equal(conversation?.entries.length, 5);
+    assert.equal(conversation?.entries[0]?.text, "Answer 9");
     assert.equal(conversation?.entries.at(-1)?.text, "Answer 11");
     assert.equal(conversation?.hasMore, true);
   });
@@ -348,6 +410,9 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
       assert.equal(pollResponse.status, 401);
       assert.equal(pollResponse.body.error, "Unauthorized");
 
+      const petResponse = await requestPet("cody", token);
+      assert.equal(petResponse.status, 401);
+
       assert.equal(await websocketStatus(token), 401);
     }
 
@@ -358,6 +423,9 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     const acceptedPoll = await requestPoll("auth-client", "test-secret");
     assert.equal(acceptedPoll.status, 200);
     assert.equal(acceptedPoll.body.ok, true);
+
+    const acceptedPet = await requestPet("cody", "test-secret");
+    assert.equal(acceptedPet.status, 200);
 
     assert.equal(await websocketStatus("test-secret"), 101);
   });
@@ -651,11 +719,11 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
   });
 });
 
-async function writeSessionFixture(root, { threadId, cwd, prompt }) {
-  const directory = path.dirname(sessionFixturePath(root, threadId));
+async function writeSessionFixture(root, { threadId, fileID = threadId, cwd, prompt, meta = {}, mtimeMs = null }) {
+  const directory = path.dirname(sessionFixturePath(root, fileID));
   await fs.mkdir(directory, { recursive: true });
   await fs.mkdir(cwd, { recursive: true });
-  const file = sessionFixturePath(root, threadId);
+  const file = sessionFixturePath(root, fileID);
   const lines = [
     {
       type: "session_meta",
@@ -663,7 +731,8 @@ async function writeSessionFixture(root, { threadId, cwd, prompt }) {
         id: threadId,
         cwd,
         timestamp: "2026-05-24T15:00:00.000Z",
-        source: "test"
+        source: "test",
+        ...meta
       }
     },
     {
@@ -675,6 +744,23 @@ async function writeSessionFixture(root, { threadId, cwd, prompt }) {
     }
   ];
   await fs.writeFile(file, `${lines.map(line => JSON.stringify(line)).join("\n")}\n`);
+  if (mtimeMs !== null) {
+    const date = new Date(mtimeMs);
+    await fs.utimes(file, date, date);
+  }
+}
+
+async function writePetFixture(root, id) {
+  const directory = path.join(root, id);
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(path.join(directory, "pet.json"), JSON.stringify({
+    id,
+    displayName: "Cody",
+    description: "Fixture pet",
+    spriteVersionNumber: 2,
+    spritesheetPath: "spritesheet.webp"
+  }));
+  await fs.writeFile(path.join(directory, "spritesheet.webp"), "fixture-webp");
 }
 
 function sessionFixturePath(root, threadId) {
@@ -716,6 +802,17 @@ async function requestPoll(client, token = null) {
     status: response.status,
     challenge: response.headers.get("www-authenticate"),
     body: await response.json()
+  };
+}
+
+async function requestPet(id, token = null) {
+  const response = await fetch(`${baseURL()}/codex-watch/pets/${encodeURIComponent(id)}/spritesheet`, {
+    headers: requestHeaders(token)
+  });
+  return {
+    status: response.status,
+    contentType: response.headers.get("content-type"),
+    body: Buffer.from(await response.arrayBuffer())
   };
 }
 

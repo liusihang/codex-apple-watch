@@ -60,7 +60,28 @@ struct CodexPet: Identifiable, Codable, Equatable {
     let id: String
     let displayName: String
     let description: String
-    let imageName: String
+    let imageName: String?
+    let spriteVersionNumber: Int?
+    let spritePath: String?
+    let spriteRevision: String?
+
+    init(
+        id: String,
+        displayName: String,
+        description: String,
+        imageName: String? = nil,
+        spriteVersionNumber: Int? = nil,
+        spritePath: String? = nil,
+        spriteRevision: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.description = description
+        self.imageName = imageName
+        self.spriteVersionNumber = spriteVersionNumber
+        self.spritePath = spritePath
+        self.spriteRevision = spriteRevision
+    }
 
     static let builtIns: [CodexPet] = [
         CodexPet(id: "codex", displayName: "Codex", description: "The original Codex companion", imageName: "codex-spritesheet-v4"),
@@ -73,8 +94,16 @@ struct CodexPet: Identifiable, Codable, Equatable {
         CodexPet(id: "null-signal", displayName: "Null Signal", description: "Quiet signal from the void", imageName: "null-signal-spritesheet-v4")
     ]
 
-    static func pet(id: String?) -> CodexPet {
-        builtIns.first { $0.id == id } ?? builtIns[0]
+    static func pet(id: String?, in pets: [CodexPet] = builtIns) -> CodexPet {
+        pets.first { $0.id == id } ?? builtIns[0]
+    }
+
+    var spriteRows: Int {
+        spriteVersionNumber == 2 ? 11 : 9
+    }
+
+    var isRemote: Bool {
+        spritePath != nil
     }
 
     var accentColor: Color {

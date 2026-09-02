@@ -12,6 +12,9 @@ const port = Number(process.env.CODEX_WATCH_PORT || 17842);
 const host = process.env.CODEX_WATCH_HOST || "::";
 const audioDir = path.join(process.cwd(), ".codex-watch", "audio");
 const defaultCodexSessionsDir = path.join(os.homedir(), ".codex", "sessions");
+const defaultCodexPetsDir = path.join(os.homedir(), ".codex", "pets");
+const mainChatLimit = 10;
+const conversationMessageLimit = 5;
 const codexAPIBaseURL = (process.env.CODEX_WATCH_CODEX_API_BASE_URL || "https://chatgpt.com/backend-api")
   .replace(/\/+$/, "");
 const defaultTranscriptionModel = "gpt-4o-mini-transcribe";
@@ -64,6 +67,35 @@ export function createBridgeServer() {
       }
       const client = getHTTPClient(clientIDFromURL(requestURL), request.socket);
       jsonResponse(response, 200, { ok: true, messages: drainQueuedMessages(client) });
+      return;
+    }
+
+    const petAssetMatch = requestURL.pathname.match(/^\/codex-watch\/pets\/([^/]+)\/spritesheet$/);
+    if (petAssetMatch && request.method === "GET") {
+      if (!isAuthorizedRequest(request, authToken)) {
+        unauthorizedJSONResponse(response);
+        return;
+      }
+      let petID;
+      try {
+        petID = decodeURIComponent(petAssetMatch[1]);
+      } catch {
+        jsonResponse(response, 400, { ok: false, error: "Invalid pet ID" });
+        return;
+      }
+      const asset = loadCodexPetAssets().find(candidate => candidate.id === petID);
+      if (!asset) {
+        jsonResponse(response, 404, { ok: false, error: "Pet not found" });
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": asset.contentType,
+        "content-length": asset.size,
+        "cache-control": "private, max-age=3600",
+        etag: `"${asset.revision}"`
+      });
+      console.log("pet asset", petID, `${asset.size} bytes`);
+      fs.createReadStream(asset.file).pipe(response);
       return;
     }
 
@@ -247,7 +279,8 @@ function handleText(client, text) {
       console.log("hello", client.pet, client.capabilities.join(",") || "no-capabilities");
       maybeOpenCodex();
       resolveClientSelection(client);
-      send(client, replayStateForClient(client) ?? {
+      send(client, {
+        ...(replayStateForClient(client) ?? {
         type: "state",
         pet: client.pet,
         state: "idle",
@@ -256,6 +289,8 @@ function handleText(client, text) {
         capabilities: client.capabilities,
         items: client.pickerItems,
         ...client.selection
+        }),
+        pets: loadCodexPets()
       });
       refreshClientStateFromCodex(client).catch(error => {
         warnBridge("state refresh failed", error);
@@ -297,6 +332,7 @@ function handleText(client, text) {
         state: message.state || "idle",
         capabilities: client.capabilities,
         items: client.pickerItems,
+        pets: loadCodexPets(),
         ...client.selection
       });
       break;
@@ -883,7 +919,7 @@ async function handleChatOpened(client, message) {
   applyTranscriptTargetSelection(client, target.item, target.threadId);
   const localEntries = conversationEntriesForThread(target.threadId);
   let allEntries = localEntries.length >= 2 ? localEntries : [];
-  let hasMore = allEntries.length > 20;
+  let hasMore = allEntries.length > conversationMessageLimit;
   let resume = null;
   let resumeError = null;
   if (allEntries.length === 0) {
@@ -903,13 +939,13 @@ async function handleChatOpened(client, message) {
   }
   if (allEntries.length === 0) {
     allEntries = localEntries;
-    hasMore = localEntries.length > 20;
+    hasMore = localEntries.length > conversationMessageLimit;
   }
   if (allEntries.length === 0 && resumeError) {
     throw resumeError;
   }
 
-  const limit = 20;
+  const limit = conversationMessageLimit;
   const item = target.item || client.pickerItems.find(candidate => candidate.chat === target.threadId);
   send(client, {
     type: "conversation",
@@ -934,7 +970,7 @@ async function conversationPageFromAppServer(appServer, threadId, resume) {
 
   let cursor = itemsCursor;
   const descendingEntries = [];
-  for (let pageIndex = 0; cursor && descendingEntries.length <= 20 && pageIndex < 5; pageIndex += 1) {
+  for (let pageIndex = 0; cursor && descendingEntries.length <= conversationMessageLimit && pageIndex < 5; pageIndex += 1) {
     const page = await appServer.request("thread/items/list", {
       threadId,
       cursor,
@@ -2049,11 +2085,23 @@ function loadCodexPickerItems() {
   try {
     const sessionFiles = findSessionFiles(currentCodexSessionsDir())
       .map(file => ({ file, mtimeMs: fs.statSync(file).mtimeMs }))
-      .sort((left, right) => right.mtimeMs - left.mtimeMs)
-      .slice(0, Number(process.env.CODEX_WATCH_MAX_SESSIONS || 500));
-    const sessions = sessionFiles
-      .map(({ file, mtimeMs }) => readSessionSummary(file, mtimeMs))
-      .filter(Boolean);
+      .sort((left, right) => right.mtimeMs - left.mtimeMs);
+    const sessions = [];
+    const seenThreadIDs = new Set();
+    for (const { file, mtimeMs } of sessionFiles) {
+      const session = readSessionSummary(file, mtimeMs);
+      if (!session || session.isSubagent) {
+        continue;
+      }
+      if (seenThreadIDs.has(session.id)) {
+        continue;
+      }
+      seenThreadIDs.add(session.id);
+      sessions.push(session);
+      if (sessions.length === mainChatLimit) {
+        break;
+      }
+    }
     sessionFileByThread.clear();
     for (const session of sessions) {
       sessionFileByThread.set(session.id, session.file);
@@ -2067,6 +2115,60 @@ function loadCodexPickerItems() {
 
 function currentCodexSessionsDir() {
   return process.env.CODEX_SESSIONS_DIR || defaultCodexSessionsDir;
+}
+
+function currentCodexPetsDir() {
+  return process.env.CODEX_WATCH_PETS_DIR || defaultCodexPetsDir;
+}
+
+function loadCodexPets() {
+  return loadCodexPetAssets().map(({ file, contentType, size, ...pet }) => pet);
+}
+
+function loadCodexPetAssets() {
+  const directory = currentCodexPetsDir();
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
+  const pets = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    try {
+      const petDirectory = path.join(directory, entry.name);
+      const manifest = JSON.parse(fs.readFileSync(path.join(petDirectory, "pet.json"), "utf8"));
+      const id = stringOrNull(manifest.id);
+      const relativeSpritePath = stringOrNull(manifest.spritesheetPath);
+      if (!id || !relativeSpritePath) {
+        continue;
+      }
+      const realPetDirectory = fs.realpathSync(petDirectory);
+      const file = fs.realpathSync(path.resolve(petDirectory, relativeSpritePath));
+      if (file !== realPetDirectory && !file.startsWith(`${realPetDirectory}${path.sep}`)) {
+        continue;
+      }
+      const extension = path.extname(file).toLowerCase();
+      if (extension !== ".webp" && extension !== ".png") {
+        continue;
+      }
+      const stat = fs.statSync(file);
+      pets.push({
+        id,
+        displayName: stringOrNull(manifest.displayName) || id,
+        description: stringOrNull(manifest.description) || "Installed on this Mac",
+        spriteVersionNumber: Number(manifest.spriteVersionNumber) === 2 ? 2 : 1,
+        spritePath: `/codex-watch/pets/${encodeURIComponent(id)}/spritesheet`,
+        spriteRevision: `${Math.trunc(stat.mtimeMs)}-${stat.size}`,
+        file,
+        contentType: extension === ".png" ? "image/png" : "image/webp",
+        size: stat.size
+      });
+    } catch (error) {
+      warnBridge(`failed to load pet ${entry.name}`, error);
+    }
+  }
+  return pets.sort((left, right) => left.displayName.localeCompare(right.displayName));
 }
 
 function currentTranscriptionProvider() {
@@ -2119,6 +2221,7 @@ function readSessionSummary(file, mtimeMs) {
     timestamp: meta.timestamp || new Date(mtimeMs).toISOString(),
     title: summarizePrompt(userTexts) || shortSessionID(meta.id),
     source: meta.source || null,
+    isSubagent: Boolean(meta.parent_thread_id || meta.agent_role || meta.source?.subagent),
     file,
     mtimeMs
   };
@@ -2190,13 +2293,10 @@ function buildPickerItems(sessions) {
   }
 
   const projects = [...projectMap.values()]
-    .sort((left, right) => right.latestMs - left.latestMs)
-    .slice(0, Number(process.env.CODEX_WATCH_MAX_PROJECTS || 80));
+    .sort((left, right) => right.latestMs - left.latestMs);
+  const projectIndexByID = new Map(projects.map((project, index) => [project.id, index]));
   const items = [];
   projects.forEach((project, projectIndex) => {
-    const sortedSessions = project.sessions
-      .sort((left, right) => right.mtimeMs - left.mtimeMs)
-      .slice(0, Number(process.env.CODEX_WATCH_MAX_CHATS_PER_PROJECT || 80));
     items.push({
       id: project.id,
       title: projectTitle(project.cwd),
@@ -2206,20 +2306,23 @@ function buildPickerItems(sessions) {
       project: project.id,
       projectIndex
     });
-    sortedSessions.forEach((session, chatIndex) => {
+  });
+  [...sessions]
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .forEach((session, chatIndex) => {
+      const project = projectIDForPath(session.cwd);
       items.push({
         id: session.id,
         title: session.title,
         subtitle: relativeTimeLabel(session.mtimeMs),
         kind: "chat",
         section: "chats",
-        project: project.id,
+        project,
         chat: session.id,
-        projectIndex,
+        projectIndex: projectIndexByID.get(project) ?? 0,
         chatIndex
       });
     });
-  });
 
   return items.length > 0 ? items : fallbackPickerItems();
 }

@@ -353,6 +353,39 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertEqual(model.selectedPet.id, "fireball")
     }
 
+    func testIncomingInstalledPetListDownloadsAndRestoresThirdPartyPet() async {
+        defaults.set("cody", forKey: "selectedPetID")
+        let requested = expectation(description: "remote pet requested")
+        let sprite = Data("fixture-sprite".utf8)
+        let model = makeModel { url, token in
+            XCTAssertEqual(url.absoluteString, "https://watch.example.com/codex-watch/pets/cody/spritesheet?v=revision-1")
+            XCTAssertEqual(token, "watch-secret")
+            requested.fulfill()
+            return sprite
+        }
+        model.serverURLString = "wss://watch.example.com/codex-watch"
+        model.bridgeToken = "watch-secret"
+
+        socket.emit(BridgeMessage(
+            type: "state",
+            pets: [CodexPet(
+                id: "cody",
+                displayName: "Cody",
+                description: "Installed on this Mac",
+                spriteVersionNumber: 2,
+                spritePath: "/codex-watch/pets/cody/spritesheet",
+                spriteRevision: "revision-1"
+            )]
+        ))
+
+        await fulfillment(of: [requested], timeout: 1)
+        await Task.yield()
+        XCTAssertEqual(model.availablePets.first?.id, "cody")
+        XCTAssertEqual(model.selectedPet.id, "cody")
+        XCTAssertEqual(model.selectedPet.spriteRows, 11)
+        XCTAssertEqual(model.spriteData(for: model.selectedPet), sprite)
+    }
+
     func testOpeningChatRequestsAndDisplaysConversationHistory() async {
         let model = makeModel()
         model.connect()
@@ -568,7 +601,10 @@ final class CompanionViewModelTests: XCTestCase {
         XCTAssertNil(BridgeAuthorization(token: "bad\r\ntoken"))
     }
 
-    private func makeModel(environment: [String: String] = [:]) -> CompanionViewModel {
+    private func makeModel(
+        environment: [String: String] = [:],
+        petSpriteLoader: @escaping PetSpriteLoader = { _, _ in Data() }
+    ) -> CompanionViewModel {
         CompanionViewModel(
             socket: socket,
             audio: audio,
@@ -577,6 +613,7 @@ final class CompanionViewModelTests: XCTestCase {
             defaults: defaults,
             bridgeTokenLoader: { [weak self] in self?.storedBridgeToken },
             bridgeTokenSaver: { [weak self] token in self?.storedBridgeToken = token },
+            petSpriteLoader: petSpriteLoader,
             environment: environment
         )
     }
