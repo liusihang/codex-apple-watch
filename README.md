@@ -218,7 +218,7 @@ Unread replies and thinking/running task cards are persisted locally on the watc
 
 Chat selection and chat opening are separate protocol actions. `chat-selected` updates the current target while Crown scrolling; `chat-opened` requests conversation content. The bridge excludes subagent sessions, keeps the 10 most recently interacted main conversations, reads persisted session JSONL first, and uses paginated app-server history when a local session is unavailable. Conversation responses contain the latest five user/assistant messages. Pet and chat selections remain isolated per connected Watch client.
 
-On each Watch connection and picker refresh, the bridge reads third-party pet manifests from `~/.codex/pets`. It sends the pet metadata to the Watch and exposes each PNG/WebP spritesheet through a bearer-authenticated asset endpoint. The Watch downloads and renders v1 8×9 and v2 8×11 spritesheets dynamically, so newly installed Mac pets require only a Watch reconnect rather than a source-code change.
+On each Watch connection and picker refresh, the bridge reads third-party pet manifests from `~/.codex/pets`. PNG assets are served directly; WebP assets are converted once with macOS `sips` and cached as transparent PNG because watchOS ImageIO does not decode WebP. The bearer-authenticated asset endpoint then supplies the Watch-compatible PNG while preserving v1 8×9 and v2 8×11 atlas layout. Newly installed Mac pets require only a Watch reconnect rather than a source-code change.
 
 ## Development
 

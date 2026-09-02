@@ -23,6 +23,7 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
     await writePetFixture(path.join(tempDir, "pets"), "cody");
     process.env.CODEX_SESSIONS_DIR = tempDir;
     process.env.CODEX_WATCH_PETS_DIR = path.join(tempDir, "pets");
+    process.env.CODEX_WATCH_PET_CACHE_DIR = path.join(tempDir, "pet-cache");
     process.env.CODEX_WATCH_MOCK_APP_SERVER = "1";
     process.env.CODEX_WATCH_MOCK_REPLY = "Mock **reply** with `inlineCode`.";
     delete process.env.CODEX_WATCH_AUTH_TOKEN;
@@ -67,8 +68,8 @@ describe("Codex Watch bridge E2E", { concurrency: false }, () => {
   test("serves installed pet sprites through the bridge", async () => {
     const response = await requestPet("cody");
     assert.equal(response.status, 200);
-    assert.equal(response.contentType, "image/webp");
-    assert.equal(response.body.toString(), "fixture-webp");
+    assert.equal(response.contentType, "image/png");
+    assert.equal(response.body.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
   });
 
   test("picker returns only the 10 most recent main conversations", async () => {
@@ -760,7 +761,10 @@ async function writePetFixture(root, id) {
     spriteVersionNumber: 2,
     spritesheetPath: "spritesheet.webp"
   }));
-  await fs.writeFile(path.join(directory, "spritesheet.webp"), "fixture-webp");
+  await fs.writeFile(
+    path.join(directory, "spritesheet.webp"),
+    Buffer.from("UklGRhwAAABXRUJQVlA4TA8AAAAvAUAAEAcQ/Y8CBiKi/wEA", "base64")
+  );
 }
 
 function sessionFixturePath(root, threadId) {

@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 const port = Number(process.env.CODEX_WATCH_PORT || 17842);
 const host = process.env.CODEX_WATCH_HOST || "::";
 const audioDir = path.join(process.cwd(), ".codex-watch", "audio");
+const defaultPetAssetCacheDir = path.join(process.cwd(), ".codex-watch", "pets");
 const defaultCodexSessionsDir = path.join(os.homedir(), ".codex", "sessions");
 const defaultCodexPetsDir = path.join(os.homedir(), ".codex", "pets");
 const mainChatLimit = 10;
@@ -2121,6 +2122,10 @@ function currentCodexPetsDir() {
   return process.env.CODEX_WATCH_PETS_DIR || defaultCodexPetsDir;
 }
 
+function currentPetAssetCacheDir() {
+  return process.env.CODEX_WATCH_PET_CACHE_DIR || defaultPetAssetCacheDir;
+}
+
 function loadCodexPets() {
   return loadCodexPetAssets().map(({ file, contentType, size, ...pet }) => pet);
 }
@@ -2152,23 +2157,49 @@ function loadCodexPetAssets() {
       if (extension !== ".webp" && extension !== ".png") {
         continue;
       }
-      const stat = fs.statSync(file);
+      const sourceStat = fs.statSync(file);
+      const sourceRevision = `${Math.trunc(sourceStat.mtimeMs)}-${sourceStat.size}`;
+      const servedFile = extension === ".webp"
+        ? cachedPNGPetAsset(file, id, sourceRevision)
+        : file;
+      const servedStat = fs.statSync(servedFile);
       pets.push({
         id,
         displayName: stringOrNull(manifest.displayName) || id,
         description: stringOrNull(manifest.description) || "Installed on this Mac",
         spriteVersionNumber: Number(manifest.spriteVersionNumber) === 2 ? 2 : 1,
         spritePath: `/codex-watch/pets/${encodeURIComponent(id)}/spritesheet`,
-        spriteRevision: `${Math.trunc(stat.mtimeMs)}-${stat.size}`,
-        file,
-        contentType: extension === ".png" ? "image/png" : "image/webp",
-        size: stat.size
+        spriteRevision: `${sourceRevision}-png`,
+        file: servedFile,
+        contentType: "image/png",
+        size: servedStat.size
       });
     } catch (error) {
       warnBridge(`failed to load pet ${entry.name}`, error);
     }
   }
   return pets.sort((left, right) => left.displayName.localeCompare(right.displayName));
+}
+
+function cachedPNGPetAsset(sourceFile, petID, revision) {
+  const cacheDirectory = currentPetAssetCacheDir();
+  fs.mkdirSync(cacheDirectory, { recursive: true });
+  const cacheID = crypto.createHash("sha256").update(petID).digest("hex").slice(0, 16);
+  const output = path.join(cacheDirectory, `${cacheID}-${revision}.png`);
+  if (fs.existsSync(output)) {
+    return output;
+  }
+  const temporary = `${output}.${process.pid}.tmp.png`;
+  try {
+    execFileSync("/usr/bin/sips", ["-s", "format", "png", sourceFile, "--out", temporary], {
+      stdio: "ignore"
+    });
+    fs.renameSync(temporary, output);
+    return output;
+  } catch (error) {
+    fs.rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function currentTranscriptionProvider() {
